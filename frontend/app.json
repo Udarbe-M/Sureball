@@ -1,0 +1,34 @@
+{
+  "expo": {
+    "name": "SureBall",
+    "slug": "sureball-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "permissions": [
+        "CAMERA"
+      ],
+      "package": "com.sureball.mobile"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow SureBall to access your camera for live coaching analysis."
+        }
+      ]
+    ],
+    "extra": {
+      "backendUrl": "http://10.0.2.2:8000",
+      "supabaseUrl": "https://ysgdbzdsvtntutgbzopu.supabase.co",
+      "supabasePublishableKey": "sb_publishable_gFGpcBLUlNB3lICyjftefw_5wjFUlZ5"
+    }
+  }
+}
