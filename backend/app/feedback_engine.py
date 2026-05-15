@@ -44,6 +44,19 @@ def extract_features(mode: CoachingMode, landmarks: Dict[str, Dict[str, float]],
     if ball_center and "nose" in landmarks:
         features.ball_release_position = landmarks["nose"]["y"] - ball_center["y"]
 
+    if (
+        ball_center
+        and "left_shoulder" in landmarks
+        and "right_shoulder" in landmarks
+        and "left_hip" in landmarks
+        and "right_hip" in landmarks
+    ):
+        shoulder_mid = midpoint(landmarks["left_shoulder"], landmarks["right_shoulder"])
+        hip_mid = midpoint(landmarks["left_hip"], landmarks["right_hip"])
+        torso_mid = midpoint(shoulder_mid, hip_mid)
+        features.ball_body_offset = abs(ball_center["x"] - torso_mid["x"]) / shoulder_width
+        features.ball_vertical_zone = _classify_ball_vertical_zone(ball_center, shoulder_mid, hip_mid)
+
     if "left_shoulder" in landmarks and "right_shoulder" in landmarks and "left_hip" in landmarks and "right_hip" in landmarks:
         shoulder_level_delta = abs(landmarks["left_shoulder"]["y"] - landmarks["right_shoulder"]["y"])
         hip_level_delta = abs(landmarks["left_hip"]["y"] - landmarks["right_hip"]["y"])
@@ -141,7 +154,35 @@ def generate_feedback(mode: CoachingMode, features: FeatureSet, ball_detected: b
                     deduction=8,
                 )
             )
-        summary = "Defensive stance analyzed using stance width, knee bend, torso readiness, and balance."
+        if ball_detected:
+            if features.ball_vertical_zone == "high":
+                feedback.append(
+                    FeedbackCue(
+                        code="defense_ball_height",
+                        message="Keep the ball lower in your stance so you stay ready and protect it.",
+                        severity="medium",
+                        deduction=8,
+                    )
+                )
+            if features.ball_body_offset is not None and features.ball_body_offset > 1.0:
+                feedback.append(
+                    FeedbackCue(
+                        code="defense_ball_security",
+                        message="Keep the ball tighter to your body while holding the stance.",
+                        severity="medium",
+                        deduction=8,
+                    )
+                )
+        else:
+            feedback.append(
+                FeedbackCue(
+                    code="defense_ball_not_detected",
+                    message="Basketball not detected. Keep the ball in frame for stance plus ball-security feedback.",
+                    severity="low",
+                    deduction=4,
+                )
+            )
+        summary = "Defensive stance analyzed using stance width, knee bend, torso readiness, balance, and ball security."
 
     else:
         if features.feet_spacing is not None and not (0.9 <= features.feet_spacing <= 1.45):
@@ -180,7 +221,35 @@ def generate_feedback(mode: CoachingMode, features: FeatureSet, ball_detected: b
                     deduction=10,
                 )
             )
-        summary = "Basic footwork checked for stable base, posture control, ready knees, and symmetry."
+        if ball_detected:
+            if features.ball_to_wrist_distance is not None and features.ball_to_wrist_distance > 0.72:
+                feedback.append(
+                    FeedbackCue(
+                        code="footwork_ball_control",
+                        message="Keep the ball connected to your hands while moving through the drill.",
+                        severity="medium",
+                        deduction=8,
+                    )
+                )
+            if features.ball_body_offset is not None and features.ball_body_offset > 1.15:
+                feedback.append(
+                    FeedbackCue(
+                        code="footwork_ball_path",
+                        message="Keep the ball closer to your frame instead of letting it drift wide.",
+                        severity="medium",
+                        deduction=8,
+                    )
+                )
+        else:
+            feedback.append(
+                FeedbackCue(
+                    code="footwork_ball_not_detected",
+                    message="Basketball not detected. Keep it visible if you want movement plus ball-control feedback.",
+                    severity="low",
+                    deduction=4,
+                )
+            )
+        summary = "Basic footwork checked for base, posture control, ready knees, symmetry, and ball control."
 
     if not ball_detected and mode == "shooting_form":
         feedback.append(
@@ -220,3 +289,15 @@ def _active_side_points(landmarks: Dict[str, Dict[str, float]], side: str) -> Di
         for short_name, full_name in mapping.items()
         if full_name in landmarks
     }
+
+
+def _classify_ball_vertical_zone(
+    ball_center: Dict[str, float],
+    shoulder_mid: Dict[str, float],
+    hip_mid: Dict[str, float],
+) -> str:
+    if ball_center["y"] <= shoulder_mid["y"]:
+        return "high"
+    if ball_center["y"] <= hip_mid["y"]:
+        return "torso"
+    return "low"

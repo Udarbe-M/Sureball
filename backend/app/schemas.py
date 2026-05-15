@@ -35,6 +35,8 @@ class FeatureSet(BaseModel):
     feet_spacing: Optional[float] = None
     ball_to_wrist_distance: Optional[float] = None
     ball_release_position: Optional[float] = None
+    ball_body_offset: Optional[float] = None
+    ball_vertical_zone: Optional[str] = None
     body_balance: Optional[float] = None
     symmetry_score: Optional[float] = None
 

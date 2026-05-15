@@ -1,5 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Image, ScrollView, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Image,
+  ScrollView,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { commonStyles } from "../theme/styles";
 import PrimaryButton from "../components/PrimaryButton";
@@ -7,6 +14,55 @@ import { analyzeFrame } from "../services/api";
 import { saveSessionRecord } from "../services/storage";
 import { colors } from "../theme/colors";
 import { normalizeClassification } from "../utils/helpers";
+
+function formatBallZone(zone) {
+  if (!zone) {
+    return "Waiting";
+  }
+  if (zone === "high") {
+    return "High";
+  }
+  if (zone === "torso") {
+    return "Pocket";
+  }
+  return "Low";
+}
+
+function describeBallControl(distanceValue) {
+  if (typeof distanceValue !== "number") {
+    return "Waiting";
+  }
+  if (distanceValue <= 0.42) {
+    return "Tight";
+  }
+  if (distanceValue <= 0.72) {
+    return "Stable";
+  }
+  return "Loose";
+}
+
+function TrackingBadge({ label, value, tone = "neutral" }) {
+  const accentColor =
+    tone === "success" ? colors.success : tone === "warning" ? colors.warning : colors.secondary;
+
+  return (
+    <View
+      style={{
+        paddingHorizontal: 12,
+        paddingVertical: 9,
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: accentColor,
+        backgroundColor: "rgba(7, 17, 31, 0.82)",
+      }}
+    >
+      <Text style={{ color: colors.muted, fontSize: 10, fontWeight: "800", letterSpacing: 1 }}>
+        {label}
+      </Text>
+      <Text style={{ color: colors.text, fontSize: 13, fontWeight: "800", marginTop: 3 }}>{value}</Text>
+    </View>
+  );
+}
 
 export default function LiveAnalysisScreen({ route }) {
   const mode = route.params?.mode || { id: "shooting_form", title: "Shooting Form" };
@@ -22,8 +78,18 @@ export default function LiveAnalysisScreen({ route }) {
   const [errors, setErrors] = useState([]);
   const [annotatedFrame, setAnnotatedFrame] = useState(null);
   const [lastSessionId, setLastSessionId] = useState(null);
+  const [latestAnalysis, setLatestAnalysis] = useState(null);
+  const [previewMode, setPreviewMode] = useState("camera");
 
   const modeLabel = useMemo(() => mode?.title || "Coaching", [mode]);
+  const landmarkCount = useMemo(
+    () => Object.keys(latestAnalysis?.landmarks || {}).length,
+    [latestAnalysis]
+  );
+  const ballConfidence = latestAnalysis?.ball_box?.confidence ?? null;
+  const ballZone = formatBallZone(latestAnalysis?.features?.ball_vertical_zone);
+  const ballControl = describeBallControl(latestAnalysis?.features?.ball_to_wrist_distance);
+  const overlayReady = Boolean(annotatedFrame && latestAnalysis);
 
   useEffect(() => {
     if (!permission) {
@@ -35,7 +101,10 @@ export default function LiveAnalysisScreen({ route }) {
   }, [permission, requestPermission]);
 
   async function captureAndAnalyzeFrame() {
-    if (!cameraRef.current || isAnalyzing) return;
+    if (!cameraRef.current || isAnalyzing) {
+      return;
+    }
+
     setIsAnalyzing(true);
     try {
       const photo = await cameraRef.current.takePictureAsync({
@@ -45,6 +114,7 @@ export default function LiveAnalysisScreen({ route }) {
       const result = await analyzeFrame({ mode: mode.id, photoUri: photo.uri });
       const firstCue = result.feedback?.[0]?.message || "No cue available.";
       const scoreValue = result.score?.score ?? 0;
+      const normalizedClassification = normalizeClassification(result.score?.classification);
       const detectedErrors = (result.feedback || [])
         .filter((item) => item.deduction > 0)
         .map((item) => ({
@@ -56,12 +126,17 @@ export default function LiveAnalysisScreen({ route }) {
 
       setFeedbackText(firstCue);
       setScore(scoreValue);
-      setClassification(normalizeClassification(result.score?.classification));
+      setClassification(normalizedClassification);
       setErrors(detectedErrors);
       setLastSessionId(result.session_id);
+      setLatestAnalysis(result);
 
       if (result.annotated_frame_base64) {
         setAnnotatedFrame(`data:image/jpeg;base64,${result.annotated_frame_base64}`);
+        setPreviewMode("analysis");
+      } else {
+        setAnnotatedFrame(null);
+        setPreviewMode("camera");
       }
 
       await saveSessionRecord({
@@ -71,7 +146,7 @@ export default function LiveAnalysisScreen({ route }) {
         mode: mode.id,
         modeLabel: mode.title,
         score: scoreValue,
-        classification: normalizeClassification(result.score?.classification),
+        classification: normalizedClassification,
         detectedErrors,
         timestamp: new Date().toISOString(),
       });
@@ -98,59 +173,162 @@ export default function LiveAnalysisScreen({ route }) {
         <Text style={commonStyles.eyebrow}>Live Drill</Text>
         <Text style={[commonStyles.title, { marginTop: 10 }]}>{modeLabel}</Text>
         <Text style={commonStyles.subtitle}>Player: {playerName}</Text>
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>
+          Capture a frame to combine MediaPipe pose landmarks with YOLO ball tracking.
+        </Text>
       </View>
 
       <View style={[commonStyles.card, { padding: 0, overflow: "hidden" }]}>
-        <View style={{ height: 360, backgroundColor: "#040b15" }}>
-          <CameraView ref={cameraRef} style={{ flex: 1 }} facing="back" />
+        <View
+          style={{
+            flexDirection: "row",
+            justifyContent: "space-between",
+            alignItems: "center",
+            paddingHorizontal: 18,
+            paddingVertical: 14,
+            borderBottomWidth: 1,
+            borderBottomColor: colors.border,
+            backgroundColor: colors.backgroundSoft,
+          }}
+        >
+          <View>
+            <Text style={commonStyles.label}>Analysis View</Text>
+            <Text style={[commonStyles.subtitle, { marginTop: 4 }]}>
+              {overlayReady
+                ? "Switch between the live camera and the latest tracked overlay."
+                : "Capture a frame to unlock the tracked overlay view."}
+            </Text>
+          </View>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <TouchableOpacity
+              onPress={() => setPreviewMode("camera")}
+              style={[
+                commonStyles.pill,
+                previewMode === "camera" && { borderColor: colors.primary, backgroundColor: colors.cardElevated },
+              ]}
+            >
+              <Text style={commonStyles.pillText}>Live Camera</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              disabled={!overlayReady}
+              onPress={() => overlayReady && setPreviewMode("analysis")}
+              style={[
+                commonStyles.pill,
+                previewMode === "analysis" && overlayReady
+                  ? { borderColor: colors.secondary, backgroundColor: colors.cardElevated }
+                  : null,
+                !overlayReady && { opacity: 0.45 },
+              ]}
+            >
+              <Text style={commonStyles.pillText}>Last Overlay</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={{ height: 380, backgroundColor: "#040b15" }}>
+          {previewMode === "analysis" && overlayReady ? (
+            <Image source={{ uri: annotatedFrame }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+          ) : (
+            <CameraView ref={cameraRef} style={{ flex: 1 }} facing="back" />
+          )}
+
           <View
             style={{
               position: "absolute",
-              top: 40,
-              left: 24,
-              right: 24,
-              bottom: 20,
-              borderWidth: 2,
-              borderStyle: "dashed",
-              borderColor: colors.success,
-            }}
-          />
-          <View
-            style={{
-              position: "absolute",
-              top: 120,
-              right: 30,
-              width: 78,
-              height: 78,
-              borderWidth: 2,
-              borderColor: colors.primary,
-            }}
-          />
-          <Text
-            style={{
-              position: "absolute",
-              top: 10,
-              left: 10,
-              color: colors.text,
-              fontWeight: "800",
-              letterSpacing: 0.6,
-            }}
-          >
-            TRAINING OVERLAY
-          </Text>
-          <Text
-            style={{
-              position: "absolute",
-              top: 95,
+              top: 18,
+              left: 18,
               right: 18,
-              color: colors.primary,
-              fontWeight: "800",
-              fontSize: 12,
-              letterSpacing: 0.6,
+              flexDirection: "row",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
             }}
           >
-            BALL TRACK
-          </Text>
+            <View
+              style={{
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                borderRadius: 16,
+                backgroundColor: "rgba(7, 17, 31, 0.82)",
+                borderWidth: 1,
+                borderColor: previewMode === "analysis" ? colors.secondary : colors.primary,
+                maxWidth: "68%",
+              }}
+            >
+              <Text style={{ color: colors.muted, fontSize: 10, fontWeight: "800", letterSpacing: 1 }}>
+                {previewMode === "analysis" ? "TRACKED OVERLAY" : "LIVE CAMERA"}
+              </Text>
+              <Text style={{ color: colors.text, fontSize: 15, fontWeight: "800", marginTop: 4 }}>
+                {previewMode === "analysis" ? "YOLO Ball + MediaPipe Pose" : "Frame up the player and the ball"}
+              </Text>
+            </View>
+
+            <View
+              style={{
+                paddingHorizontal: 10,
+                paddingVertical: 9,
+                borderRadius: 14,
+                backgroundColor: "rgba(7, 17, 31, 0.82)",
+                borderWidth: 1,
+                borderColor: colors.warning,
+              }}
+            >
+              <Text style={{ color: colors.muted, fontSize: 10, fontWeight: "800", letterSpacing: 1 }}>
+                RESULT
+              </Text>
+              <Text style={{ color: colors.text, fontSize: 13, fontWeight: "800", marginTop: 3 }}>
+                {classification}
+              </Text>
+            </View>
+          </View>
+
+          {previewMode === "camera" ? (
+            <View
+              style={{
+                position: "absolute",
+                top: 52,
+                left: 28,
+                right: 28,
+                bottom: 28,
+                borderWidth: 2,
+                borderStyle: "dashed",
+                borderColor: colors.success,
+                borderRadius: 18,
+              }}
+            />
+          ) : null}
+
+          <View
+            style={{
+              position: "absolute",
+              left: 18,
+              right: 18,
+              bottom: 18,
+              flexDirection: "row",
+              flexWrap: "wrap",
+              gap: 10,
+            }}
+          >
+            <TrackingBadge
+              label="POSE"
+              value={latestAnalysis?.pose_detected ? "Locked" : "Searching"}
+              tone={latestAnalysis?.pose_detected ? "success" : "warning"}
+            />
+            <TrackingBadge
+              label="BALL"
+              value={latestAnalysis?.ball_detected ? "Locked" : "Searching"}
+              tone={latestAnalysis?.ball_detected ? "success" : "warning"}
+            />
+            <TrackingBadge
+              label="LANDMARKS"
+              value={landmarkCount > 0 ? String(landmarkCount) : "0"}
+              tone={landmarkCount > 0 ? "success" : "warning"}
+            />
+            <TrackingBadge
+              label="BALL CONF"
+              value={ballConfidence !== null ? `${Math.round(ballConfidence * 100)}%` : "Waiting"}
+              tone={ballConfidence !== null ? "success" : "warning"}
+            />
+          </View>
         </View>
       </View>
 
@@ -160,14 +338,36 @@ export default function LiveAnalysisScreen({ route }) {
         loading={isAnalyzing}
       />
 
+      <View style={{ flexDirection: "row", gap: 12, marginTop: 14, marginBottom: 14 }}>
+        <View style={commonStyles.metricTile}>
+          <Text style={commonStyles.metricLabel}>Score</Text>
+          <Text style={commonStyles.metricValue}>{score}</Text>
+        </View>
+        <View style={commonStyles.metricTile}>
+          <Text style={commonStyles.metricLabel}>Ball Control</Text>
+          <Text style={commonStyles.metricValue}>{ballControl}</Text>
+        </View>
+      </View>
+
+      <View style={{ flexDirection: "row", gap: 12, marginBottom: 14 }}>
+        <View style={commonStyles.metricTile}>
+          <Text style={commonStyles.metricLabel}>Ball Zone</Text>
+          <Text style={commonStyles.metricValue}>{ballZone}</Text>
+        </View>
+        <View style={commonStyles.metricTile}>
+          <Text style={commonStyles.metricLabel}>Class</Text>
+          <Text style={[commonStyles.metricValue, { fontSize: 18 }]}>{classification}</Text>
+        </View>
+      </View>
+
       <View style={commonStyles.card}>
         <Text style={commonStyles.label}>Real-Time Feedback</Text>
         <Text style={[commonStyles.subtitle, { marginTop: 8, color: colors.text }]}>{feedbackText}</Text>
-        <Text style={{ marginTop: 14, fontSize: 22, fontWeight: "800", color: colors.secondary }}>
-          Score: {score} ({classification})
-        </Text>
+        {latestAnalysis?.coaching_summary ? (
+          <Text style={commonStyles.subtitle}>{latestAnalysis.coaching_summary}</Text>
+        ) : null}
         {lastSessionId ? (
-          <Text style={{ marginTop: 6, color: colors.muted, fontSize: 12 }}>Session ID: {lastSessionId}</Text>
+          <Text style={{ marginTop: 10, color: colors.muted, fontSize: 12 }}>Session ID: {lastSessionId}</Text>
         ) : null}
       </View>
 
@@ -183,13 +383,6 @@ export default function LiveAnalysisScreen({ route }) {
           ))
         )}
       </View>
-
-      {annotatedFrame ? (
-        <View style={commonStyles.card}>
-          <Text style={commonStyles.label}>Latest Annotated Frame</Text>
-          <Image source={{ uri: annotatedFrame }} style={{ marginTop: 12, width: "100%", height: 220, borderRadius: 16 }} />
-        </View>
-      ) : null}
 
       {isAnalyzing ? <ActivityIndicator style={{ marginBottom: 20 }} /> : null}
 
