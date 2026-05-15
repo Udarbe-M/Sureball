@@ -26,7 +26,7 @@
       ]
     ],
     "extra": {
-      "backendUrl": "http://10.0.2.2:8000",
+      "backendUrl": "http://127.0.0.1:8000",
       "supabaseUrl": "https://ysgdbzdsvtntutgbzopu.supabase.co",
       "supabasePublishableKey": "sb_publishable_gFGpcBLUlNB3lICyjftefw_5wjFUlZ5"
     }

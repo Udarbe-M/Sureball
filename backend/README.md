@@ -47,7 +47,15 @@ pip install -r requirements.txt
 3. Optional:
 Place YOLO weights at `backend/models/yolo11n.pt`.
 
+The detector also checks `backend/models/basketball_detection_yolo11s.pt` first, or you can set `BALL_DETECTOR_MODEL` to any compatible Ultralytics checkpoint path.
+
 If no local weights are present, the code falls back to `"yolo11n.pt"`. On first run, Ultralytics may try to resolve that model automatically.
+
+## Training a Custom Basketball Detector
+
+For the 5-class basketball detector training flow, see:
+
+- `backend/training/README.md`
 
 ## Run
 
@@ -71,7 +79,7 @@ Example response:
   "service": "sureball-backend",
   "pose_estimator": "ready",
   "ball_detector_ready": true,
-  "ball_detector_model": "yolo11n.pt"
+  "ball_detector_model": "backend/models/basketball_detection_yolo11s.pt"
 }
 ```
 

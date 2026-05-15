@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -9,8 +10,18 @@ from ultralytics import YOLO
 
 class BallDetector:
     def __init__(self, model_path: Optional[str] = None) -> None:
-        default_model_path = Path(__file__).resolve().parents[1] / "models" / "yolo11n.pt"
-        resolved_model = model_path or (str(default_model_path) if default_model_path.exists() else "yolo11n.pt")
+        backend_dir = Path(__file__).resolve().parents[1]
+        models_dir = backend_dir / "models"
+        configured_model = os.getenv("BALL_DETECTOR_MODEL")
+        candidate_paths = [
+            models_dir / "basketball_detection_yolo11s.pt",
+            models_dir / "yolo11n.pt",
+            backend_dir / "yolo11n.pt",
+        ]
+        default_model_path = next((path for path in candidate_paths if path.exists()), None)
+        resolved_model = model_path or configured_model or (
+            str(default_model_path) if default_model_path is not None else "yolo11n.pt"
+        )
         self.model: Optional[YOLO] = None
         self.model_source = resolved_model
         self.ready = False

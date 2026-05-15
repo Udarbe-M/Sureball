@@ -5,9 +5,15 @@ __pycache__/
 frontend/node_modules/
 frontend/.expo/
 frontend/expo-*.log
+frontend/expo_app*.log
 
 backend/data/session_history.json
 backend/test-frame.jpg
 backend/yolo11n.pt
+backend/data/datasets/
+backend/training/runs/
+backend/models/*.pt
+yolo11*.pt
+Basketball detection.v1i.yolov5pytorch.zip
 
 SureBall Thesis/

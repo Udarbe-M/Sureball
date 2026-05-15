@@ -3,6 +3,7 @@ import Constants from "expo-constants";
 const fallbackUrl = "http://127.0.0.1:8000";
 const fallbackSupabaseUrl = "";
 const fallbackSupabasePublishableKey = "";
+const envBackendUrl = process.env.EXPO_PUBLIC_BACKEND_URL || "";
 
 function readExtra(key, fallback = "") {
   return (
@@ -12,7 +13,7 @@ function readExtra(key, fallback = "") {
   );
 }
 
-export const BACKEND_URL = readExtra("backendUrl", fallbackUrl);
+export const BACKEND_URL = envBackendUrl || readExtra("backendUrl", fallbackUrl);
 export const SUPABASE_URL = readExtra("supabaseUrl", fallbackSupabaseUrl);
 export const SUPABASE_PUBLISHABLE_KEY = readExtra(
   "supabasePublishableKey",

@@ -31,11 +31,11 @@ npm run start
 
 ## Backend URL
 
-Set in `frontend/app.json`:
+Default is set in `frontend/app.json`:
 
 ```json
 "extra": {
-  "backendUrl": "http://10.0.2.2:8000"
+  "backendUrl": "http://127.0.0.1:8000"
 }
 ```
 
@@ -44,6 +44,12 @@ Use the correct IP for your device setup:
 - Android emulator: `http://10.0.2.2:8000`
 - iOS simulator: `http://127.0.0.1:8000`
 - Physical device: `http://<your-lan-ip>:8000`
+
+For Expo Go on a physical device, you can override the backend at start time:
+
+```bash
+EXPO_PUBLIC_BACKEND_URL=http://<your-lan-ip>:8000 npm run start -- --lan
+```
 
 ## Notes
 
