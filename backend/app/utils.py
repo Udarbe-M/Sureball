@@ -159,6 +159,16 @@ def load_session_history() -> List[Dict[str, object]]:
     return json.loads(raw)
 
 
+def delete_session_history_record(session_id: str) -> bool:
+    ensure_data_dir()
+    history = load_session_history()
+    updated_history = [record for record in history if str(record.get("session_id")) != session_id]
+    if len(updated_history) == len(history):
+        return False
+    SESSION_HISTORY_PATH.write_text(json.dumps(updated_history, indent=2, default=str), encoding="utf-8")
+    return True
+
+
 def select_shooting_side(landmarks: Dict[str, Dict[str, float]], ball_center: Optional[Dict[str, float]]) -> str:
     if ball_center and "left_wrist" in landmarks and "right_wrist" in landmarks:
         left_dist = distance(landmarks["left_wrist"], ball_center)

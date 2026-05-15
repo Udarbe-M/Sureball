@@ -7,15 +7,31 @@ from typing import List
 import cv2
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .ball_detector import BallDetector
 from .feedback_engine import extract_features, generate_feedback
 from .pose_estimator import PoseEstimator
 from .scoring import calculate_score, classify_score
-from .schemas import FeedbackCue, FrameAnalysisResponse, ModeInfo, SessionRecord, VideoAnalysisResponse
+from .schemas import (
+    FeedbackCue,
+    FrameAnalysisResponse,
+    ModeInfo,
+    SessionRecord,
+    ShotTrainingStartResponse,
+    ShotTrainingStatusResponse,
+    VideoAnalysisResponse,
+)
+from .shot_training import (
+    ensure_shot_training_dirs,
+    get_shot_training_output_path,
+    get_shot_training_status,
+    start_shot_training_job,
+)
 from .utils import (
     append_session_history,
     decode_image_bytes,
+    delete_session_history_record,
     draw_text_block,
     ensure_data_dir,
     frame_to_base64,
@@ -40,6 +56,7 @@ app.add_middleware(
 )
 
 ensure_data_dir()
+ensure_shot_training_dirs()
 pose_estimator = PoseEstimator()
 ball_detector = BallDetector()
 
@@ -73,6 +90,7 @@ def health_check() -> dict:
         "pose_estimator": "ready",
         "ball_detector_ready": ball_detector.ready,
         "ball_detector_model": ball_detector.model_source,
+        "shot_training_ready": ball_detector.supports_shot_training(),
     }
 
 
@@ -85,6 +103,64 @@ def get_modes() -> List[ModeInfo]:
 def get_sessions() -> List[SessionRecord]:
     records = load_session_history()
     return [SessionRecord(**record) for record in reversed(records)]
+
+
+@app.delete("/sessions/{session_id}", response_model=dict)
+def delete_session(session_id: str) -> dict:
+    deleted = delete_session_history_record(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session record not found.")
+    return {"status": "deleted", "session_id": session_id}
+
+
+@app.post("/shooting-training/start", response_model=ShotTrainingStartResponse)
+async def start_shooting_training(
+    video: UploadFile = File(...),
+    overlay_mode: str = Form("focus_stats"),
+    test_mode: bool = Form(False),
+) -> ShotTrainingStartResponse:
+    if not ball_detector.ready:
+        raise HTTPException(status_code=503, detail="Ball detector model is not ready.")
+    if not ball_detector.supports_shot_training():
+        raise HTTPException(
+            status_code=503,
+            detail="Shot training requires the custom 5-class SureBall detector weights.",
+        )
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(status_code=400, detail="Please upload a video file.")
+    if overlay_mode not in {"full_tracking", "focus_stats", "stats_only"}:
+        raise HTTPException(status_code=400, detail="Invalid shot training overlay mode.")
+
+    job = start_shot_training_job(
+        detector=ball_detector,
+        video=video,
+        overlay_mode=overlay_mode,
+        test_mode=test_mode,
+    )
+    return ShotTrainingStartResponse(
+        file_id=str(job["file_id"]),
+        status=str(job["status"]),
+        overlay_mode=str(job["overlay_mode"]),
+        test_mode=bool(job["test_mode"]),
+    )
+
+
+@app.get("/shooting-training/status/{file_id}", response_model=ShotTrainingStatusResponse)
+def get_shooting_training_status(file_id: str) -> ShotTrainingStatusResponse:
+    job = get_shot_training_status(file_id)
+    return ShotTrainingStatusResponse(**job)
+
+
+@app.get("/shooting-training/download/{file_id}")
+def download_shooting_training_result(file_id: str) -> FileResponse:
+    output_path = get_shot_training_output_path(file_id)
+    if output_path is None:
+        raise HTTPException(status_code=404, detail="Annotated result video is not ready yet.")
+    return FileResponse(
+        path=output_path,
+        media_type="video/mp4",
+        filename=f"sureball-shot-training-{file_id}.mp4",
+    )
 
 
 @app.post("/analyze-frame", response_model=FrameAnalysisResponse)

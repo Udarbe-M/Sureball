@@ -6,7 +6,9 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-CoachingMode = Literal["shooting_form", "defensive_stance", "basic_footwork"]
+CoachingMode = Literal["shooting_form", "defensive_stance", "basic_footwork", "shot_training"]
+ShotTrainingOverlayMode = Literal["full_tracking", "focus_stats", "stats_only"]
+ShotTrainingStatus = Literal["queued", "processing", "completed", "error", "not_found"]
 
 
 class Point2D(BaseModel):
@@ -88,7 +90,7 @@ class SessionRecord(BaseModel):
     score: float
     classification: str
     summary: str
-    source_type: Literal["frame", "video"]
+    source_type: Literal["frame", "video", "shot_training_video"]
 
 
 class ModeInfo(BaseModel):
@@ -100,3 +102,31 @@ class ModeInfo(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+class ShotTrainingStats(BaseModel):
+    attempts: int = 0
+    makes: int = 0
+    misses: int = 0
+    accuracy: float = 0.0
+
+
+class ShotTrainingStartResponse(BaseModel):
+    file_id: str
+    status: ShotTrainingStatus
+    overlay_mode: ShotTrainingOverlayMode
+    test_mode: bool = False
+
+
+class ShotTrainingStatusResponse(BaseModel):
+    file_id: str
+    status: ShotTrainingStatus
+    overlay_mode: Optional[ShotTrainingOverlayMode] = None
+    test_mode: bool = False
+    processed_frames: int = 0
+    total_frames: int = 0
+    progress_percentage: int = 0
+    stats: ShotTrainingStats = Field(default_factory=ShotTrainingStats)
+    classification: Optional[str] = None
+    summary: Optional[str] = None
+    error_message: Optional[str] = None

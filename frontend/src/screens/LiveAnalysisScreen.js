@@ -84,7 +84,7 @@ export default function LiveAnalysisScreen({ route }) {
 
   if (!permission?.granted) {
     return (
-      <View style={[commonStyles.screen, { justifyContent: "center" }]}>
+      <View style={commonStyles.screenCentered}>
         <Text style={commonStyles.title}>Camera Permission Needed</Text>
         <Text style={commonStyles.subtitle}>Allow camera access so SureBall can run live analysis.</Text>
         <PrimaryButton title="Allow Camera" onPress={requestPermission} />
@@ -93,14 +93,15 @@ export default function LiveAnalysisScreen({ route }) {
   }
 
   return (
-    <ScrollView style={commonStyles.screen}>
-      <View style={commonStyles.card}>
-        <Text style={commonStyles.title}>{modeLabel}</Text>
+    <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
+      <View style={commonStyles.heroCard}>
+        <Text style={commonStyles.eyebrow}>Live Drill</Text>
+        <Text style={[commonStyles.title, { marginTop: 10 }]}>{modeLabel}</Text>
         <Text style={commonStyles.subtitle}>Player: {playerName}</Text>
       </View>
 
       <View style={[commonStyles.card, { padding: 0, overflow: "hidden" }]}>
-        <View style={{ height: 360, backgroundColor: "#0f172a" }}>
+        <View style={{ height: 360, backgroundColor: "#040b15" }}>
           <CameraView ref={cameraRef} style={{ flex: 1 }} facing="back" />
           <View
             style={{
@@ -111,7 +112,7 @@ export default function LiveAnalysisScreen({ route }) {
               bottom: 20,
               borderWidth: 2,
               borderStyle: "dashed",
-              borderColor: "#34d399",
+              borderColor: colors.success,
             }}
           />
           <View
@@ -122,7 +123,7 @@ export default function LiveAnalysisScreen({ route }) {
               width: 78,
               height: 78,
               borderWidth: 2,
-              borderColor: "#fb923c",
+              borderColor: colors.primary,
             }}
           />
           <Text
@@ -130,23 +131,25 @@ export default function LiveAnalysisScreen({ route }) {
               position: "absolute",
               top: 10,
               left: 10,
-              color: "#fff",
-              fontWeight: "700",
+              color: colors.text,
+              fontWeight: "800",
+              letterSpacing: 0.6,
             }}
           >
-            Skeletal Overlay Placeholder
+            TRAINING OVERLAY
           </Text>
           <Text
             style={{
               position: "absolute",
               top: 95,
               right: 18,
-              color: "#fb923c",
-              fontWeight: "700",
+              color: colors.primary,
+              fontWeight: "800",
               fontSize: 12,
+              letterSpacing: 0.6,
             }}
           >
-            Ball Box Placeholder
+            BALL TRACK
           </Text>
         </View>
       </View>
@@ -160,7 +163,7 @@ export default function LiveAnalysisScreen({ route }) {
       <View style={commonStyles.card}>
         <Text style={commonStyles.label}>Real-Time Feedback</Text>
         <Text style={[commonStyles.subtitle, { marginTop: 8, color: colors.text }]}>{feedbackText}</Text>
-        <Text style={{ marginTop: 12, fontSize: 18, fontWeight: "700", color: colors.secondary }}>
+        <Text style={{ marginTop: 14, fontSize: 22, fontWeight: "800", color: colors.secondary }}>
           Score: {score} ({classification})
         </Text>
         {lastSessionId ? (
@@ -184,7 +187,7 @@ export default function LiveAnalysisScreen({ route }) {
       {annotatedFrame ? (
         <View style={commonStyles.card}>
           <Text style={commonStyles.label}>Latest Annotated Frame</Text>
-          <Image source={{ uri: annotatedFrame }} style={{ marginTop: 10, width: "100%", height: 220, borderRadius: 10 }} />
+          <Image source={{ uri: annotatedFrame }} style={{ marginTop: 12, width: "100%", height: 220, borderRadius: 16 }} />
         </View>
       ) : null}
 

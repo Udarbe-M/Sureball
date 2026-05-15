@@ -1,0 +1,455 @@
+import { CameraView, useCameraPermissions } from "expo-camera";
+import * as DocumentPicker from "expo-document-picker";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Linking, ScrollView, Switch, Text, TouchableOpacity, View } from "react-native";
+import PrimaryButton from "../components/PrimaryButton";
+import { buildShootingTrainingDownloadUrl, fetchShootingTrainingStatus, startShootingTraining } from "../services/api";
+import { commonStyles } from "../theme/styles";
+import { colors } from "../theme/colors";
+
+const OVERLAY_OPTIONS = [
+  {
+    id: "focus_stats",
+    title: "Stats + Make Alerts",
+    description: "Recommended. Keep the result readable while still highlighting made baskets.",
+  },
+  {
+    id: "full_tracking",
+    title: "Full Tracking",
+    description: "Show all tracked basketball, hoop, and shooter detections in the output video.",
+  },
+  {
+    id: "stats_only",
+    title: "Stats Only",
+    description: "Only show attempts, makes, misses, and accuracy in the final video.",
+  },
+];
+
+const INITIAL_STATS = {
+  attempts: 0,
+  makes: 0,
+  misses: 0,
+  accuracy: 0,
+};
+
+export default function ShootingTrainingScreen() {
+  const [selectedVideo, setSelectedVideo] = useState(null);
+  const [videoSource, setVideoSource] = useState("upload");
+  const [overlayMode, setOverlayMode] = useState("focus_stats");
+  const [testMode, setTestMode] = useState(false);
+  const [jobId, setJobId] = useState(null);
+  const [status, setStatus] = useState("idle");
+  const [progress, setProgress] = useState(0);
+  const [stats, setStats] = useState(INITIAL_STATS);
+  const [summary, setSummary] = useState("");
+  const [classification, setClassification] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+  const [starting, setStarting] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordingStatus, setRecordingStatus] = useState("Ready to record a new clip.");
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const cameraRef = useRef(null);
+
+  useEffect(() => {
+    if (!jobId || status !== "processing") {
+      return undefined;
+    }
+
+    const timer = setInterval(async () => {
+      try {
+        const result = await fetchShootingTrainingStatus(jobId);
+        setProgress(result.progress_percentage || 0);
+        setStats(result.stats || INITIAL_STATS);
+        setSummary(result.summary || "");
+        setClassification(result.classification || "");
+
+        if (result.status === "completed") {
+          setStatus("completed");
+        } else if (result.status === "error") {
+          setStatus("error");
+          setErrorMessage(result.error_message || "Shot training failed.");
+        }
+      } catch (error) {
+        setStatus("error");
+        setErrorMessage(String(error.message || error));
+      }
+    }, 1500);
+
+    return () => clearInterval(timer);
+  }, [jobId, status]);
+
+  useEffect(() => {
+    return () => {
+      if (cameraRef.current && recording) {
+        cameraRef.current.stopRecording();
+      }
+    };
+  }, [recording]);
+
+  const selectedOverlay = useMemo(
+    () => OVERLAY_OPTIONS.find((item) => item.id === overlayMode),
+    [overlayMode]
+  );
+
+  const selectedVideoLabel = useMemo(() => {
+    if (!selectedVideo) {
+      return "No clip selected yet.";
+    }
+    return selectedVideo.name || (videoSource === "camera" ? "Recorded training clip" : "Chosen training clip");
+  }, [selectedVideo, videoSource]);
+
+  async function pickVideo() {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: "video/*",
+      copyToCacheDirectory: true,
+    });
+    if (result.canceled) {
+      return;
+    }
+
+    setVideoSource("upload");
+    setSelectedVideo(result.assets[0]);
+    setCameraOpen(false);
+    resetRunState();
+  }
+
+  async function openCameraRecorder() {
+    if (!cameraPermission?.granted) {
+      const permissionResult = await requestCameraPermission();
+      if (!permissionResult.granted) {
+        setErrorMessage("Camera permission is required to record a training clip.");
+        return;
+      }
+    }
+
+    setVideoSource("camera");
+    setCameraOpen(true);
+    setRecordingStatus("Frame the shooter and rim, then start recording.");
+    setErrorMessage("");
+  }
+
+  async function startRecordingClip() {
+    if (!cameraRef.current || recording) {
+      return;
+    }
+
+    setErrorMessage("");
+    setRecording(true);
+    setRecordingStatus("Recording in progress...");
+
+    try {
+      const result = await cameraRef.current.recordAsync({
+        maxDuration: testMode ? 15 : 30,
+      });
+
+      if (result?.uri) {
+        setSelectedVideo({
+          uri: result.uri,
+          name: `live-shot-training-${Date.now()}.mp4`,
+          mimeType: "video/mp4",
+        });
+        setRecordingStatus("Recorded clip ready for analysis.");
+        setCameraOpen(false);
+        resetRunState();
+      } else {
+        setRecordingStatus("Recording ended before a clip was saved.");
+      }
+    } catch (error) {
+      setErrorMessage(String(error.message || error));
+      setRecordingStatus("Recording failed. Try again.");
+    } finally {
+      setRecording(false);
+    }
+  }
+
+  function stopRecordingClip() {
+    if (!cameraRef.current || !recording) {
+      return;
+    }
+    cameraRef.current.stopRecording();
+    setRecordingStatus("Finishing clip...");
+  }
+
+  function closeCameraRecorder() {
+    if (recording && cameraRef.current) {
+      cameraRef.current.stopRecording();
+    }
+    setRecording(false);
+    setCameraOpen(false);
+    setRecordingStatus("Ready to record a new clip.");
+  }
+
+  async function handleStartTraining() {
+    if (!selectedVideo) {
+      return;
+    }
+
+    setStarting(true);
+    setStatus("starting");
+    setErrorMessage("");
+    setSummary("");
+    setClassification("");
+    setStats(INITIAL_STATS);
+    setProgress(0);
+
+    try {
+      const result = await startShootingTraining({
+        videoAsset: selectedVideo,
+        overlayMode,
+        testMode,
+      });
+      setJobId(result.file_id);
+      setStatus("processing");
+    } catch (error) {
+      setStatus("error");
+      setErrorMessage(String(error.message || error));
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function openResultVideo() {
+    if (!jobId) {
+      return;
+    }
+    await Linking.openURL(buildShootingTrainingDownloadUrl(jobId));
+  }
+
+  function resetRunState() {
+    setJobId(null);
+    setStatus("idle");
+    setProgress(0);
+    setStats(INITIAL_STATS);
+    setSummary("");
+    setClassification("");
+    setErrorMessage("");
+  }
+
+  return (
+    <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
+      <View style={commonStyles.heroCard}>
+        <Text style={commonStyles.eyebrow}>Shot Lab</Text>
+        <Text style={[commonStyles.title, { marginTop: 10 }]}>Shooting Training</Text>
+        <Text style={commonStyles.subtitle}>
+          Choose a saved video or record a fresh courtside clip. SureBall will estimate attempts, makes, misses,
+          and overall accuracy.
+        </Text>
+      </View>
+
+      <View style={commonStyles.card}>
+        <Text style={commonStyles.label}>Clip Source</Text>
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+          <SourceButton
+            active={videoSource === "upload"}
+            title="Choose Video"
+            description="Pick a saved training clip"
+            onPress={pickVideo}
+            disabled={status === "processing" || starting || recording}
+          />
+          <SourceButton
+            active={videoSource === "camera"}
+            title="Record Live"
+            description="Capture from the camera now"
+            onPress={openCameraRecorder}
+            disabled={status === "processing" || starting}
+          />
+        </View>
+        <Text style={[commonStyles.subtitle, { marginTop: 14, color: colors.text }]}>Selected: {selectedVideoLabel}</Text>
+        <Text style={[commonStyles.subtitle, { fontSize: 12 }]}>
+          Tip: side-angle or baseline clips work best when the entire shot path and rim stay in frame.
+        </Text>
+      </View>
+
+      {cameraOpen ? (
+        <View style={commonStyles.card}>
+          <Text style={commonStyles.label}>Live Camera Recorder</Text>
+          <Text style={commonStyles.subtitle}>{recordingStatus}</Text>
+          {cameraPermission?.granted ? (
+            <View style={{ marginTop: 14, overflow: "hidden", borderRadius: 18, borderWidth: 1, borderColor: colors.border }}>
+              <View style={{ height: 300, backgroundColor: "#040b15" }}>
+                <CameraView
+                  ref={cameraRef}
+                  style={{ flex: 1 }}
+                  mode="video"
+                  mute
+                  facing="back"
+                  videoQuality="720p"
+                />
+                <View
+                  style={{
+                    position: "absolute",
+                    top: 28,
+                    left: 20,
+                    right: 20,
+                    bottom: 28,
+                    borderWidth: 2,
+                    borderStyle: "dashed",
+                    borderColor: colors.success,
+                  }}
+                />
+                <Text
+                  style={{
+                    position: "absolute",
+                    top: 14,
+                    left: 14,
+                    color: colors.text,
+                    fontWeight: "800",
+                    letterSpacing: 0.8,
+                  }}
+                >
+                  RECORDING FRAME
+                </Text>
+              </View>
+            </View>
+          ) : (
+            <PrimaryButton title="Allow Camera" onPress={requestCameraPermission} />
+          )}
+
+          <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+            <View style={{ flex: 1 }}>
+              <PrimaryButton
+                title={recording ? "Recording..." : "Start Recording"}
+                onPress={startRecordingClip}
+                loading={false}
+                disabled={!cameraPermission?.granted || recording}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <PrimaryButton
+                title={recording ? "Stop Recording" : "Close Camera"}
+                onPress={recording ? stopRecordingClip : closeCameraRecorder}
+                disabled={starting || status === "processing"}
+              />
+            </View>
+          </View>
+        </View>
+      ) : null}
+
+      <View style={commonStyles.card}>
+        <Text style={commonStyles.label}>Output Style</Text>
+        {OVERLAY_OPTIONS.map((option) => {
+          const active = option.id === overlayMode;
+          return (
+            <TouchableOpacity
+              key={option.id}
+              onPress={() => setOverlayMode(option.id)}
+              disabled={status === "processing" || starting}
+              style={{
+                marginTop: 12,
+                borderRadius: 18,
+                borderWidth: 1,
+                borderColor: active ? colors.primary : colors.border,
+                backgroundColor: active ? "rgba(255, 122, 26, 0.12)" : colors.backgroundSoft,
+                padding: 16,
+              }}
+            >
+              <Text style={{ fontSize: 15, fontWeight: "700", color: colors.text }}>{option.title}</Text>
+              <Text style={{ marginTop: 4, color: colors.muted, fontSize: 13 }}>{option.description}</Text>
+            </TouchableOpacity>
+          );
+        })}
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>Selected: {selectedOverlay?.title}</Text>
+      </View>
+
+      <View style={commonStyles.card}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <View style={{ flex: 1, paddingRight: 12 }}>
+            <Text style={commonStyles.label}>Test Mode</Text>
+            <Text style={commonStyles.subtitle}>
+              Limit analysis to roughly the first 15 seconds so you can quickly validate camera angle and tracking.
+            </Text>
+          </View>
+          <Switch
+            value={testMode}
+            onValueChange={setTestMode}
+            thumbColor="#ffffff"
+            trackColor={{ false: colors.border, true: colors.primary }}
+            disabled={status === "processing" || starting || recording}
+          />
+        </View>
+
+        <PrimaryButton
+          title={starting || status === "processing" ? "Analyzing..." : "Start Shot Training"}
+          onPress={handleStartTraining}
+          loading={starting}
+          disabled={!selectedVideo || status === "processing" || recording}
+        />
+      </View>
+
+      <View style={commonStyles.card}>
+        <Text style={commonStyles.label}>Live Results</Text>
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>
+          Status: {status === "idle" ? "Waiting to start" : status.replace(/_/g, " ")}
+        </Text>
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>Progress: {progress}%</Text>
+
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+          <StatCard label="Attempts" value={stats.attempts} color={colors.secondary} />
+          <StatCard label="Makes" value={stats.makes} color={colors.success} />
+          <StatCard label="Accuracy" value={`${Number(stats.accuracy || 0).toFixed(1)}%`} color={colors.warning} />
+        </View>
+
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+          <StatCard label="Misses" value={stats.misses} color={colors.danger} />
+          <StatCard label="Grade" value={classification || "--"} color={colors.primary} />
+        </View>
+
+        {summary ? (
+          <Text style={[commonStyles.subtitle, { marginTop: 14, color: colors.text }]}>{summary}</Text>
+        ) : null}
+
+        {errorMessage ? (
+          <Text style={{ marginTop: 12, color: colors.danger, fontSize: 13 }}>{errorMessage}</Text>
+        ) : null}
+
+        {status === "completed" ? (
+          <PrimaryButton title="Open Annotated Result Video" onPress={openResultVideo} />
+        ) : null}
+      </View>
+    </ScrollView>
+  );
+}
+
+function SourceButton({ active, title, description, onPress, disabled }) {
+  return (
+    <TouchableOpacity
+      activeOpacity={0.9}
+      onPress={onPress}
+      disabled={disabled}
+      style={{
+        flex: 1,
+        borderRadius: 18,
+        borderWidth: 1,
+        borderColor: active ? colors.primary : colors.border,
+        backgroundColor: active ? "rgba(255, 122, 26, 0.12)" : colors.backgroundSoft,
+        padding: 14,
+        opacity: disabled ? 0.65 : 1,
+      }}
+    >
+      <Text style={{ color: colors.text, fontSize: 15, fontWeight: "800" }}>{title}</Text>
+      <Text style={{ marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 }}>{description}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function StatCard({ label, value, color }) {
+  return (
+    <View
+      style={{
+        flex: 1,
+        minHeight: 92,
+        borderRadius: 18,
+        borderWidth: 1,
+        borderColor: colors.border,
+        backgroundColor: colors.cardElevated,
+        padding: 14,
+      }}
+    >
+      <Text style={{ fontSize: 11, color: colors.muted, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase" }}>
+        {label}
+      </Text>
+      <Text style={{ marginTop: 12, fontSize: 22, fontWeight: "800", color }}>{value}</Text>
+    </View>
+  );
+}

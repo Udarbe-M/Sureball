@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { Text, View } from "react-native";
-import { commonStyles } from "../theme/styles";
+import { ScrollView, Text, TouchableOpacity, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
 import { healthCheck } from "../services/api";
 import { colors } from "../theme/colors";
+import { commonStyles } from "../theme/styles";
 
 export default function DashboardScreen({ navigation, route }) {
   const playerName = route.params?.playerName || "Student Athlete";
@@ -15,39 +15,131 @@ export default function DashboardScreen({ navigation, route }) {
     let mounted = true;
     healthCheck()
       .then(() => mounted && setBackendStatus("Connected"))
-      .catch(() => mounted && setBackendStatus("Not reachable"));
+      .catch(() => mounted && setBackendStatus("Offline"));
     return () => {
       mounted = false;
     };
   }, []);
 
   return (
-    <View style={commonStyles.screen}>
-      <View style={commonStyles.card}>
-        <Text style={commonStyles.title}>Welcome, {playerName}</Text>
-        <Text style={commonStyles.subtitle}>Prototype thesis app for real-time basketball coaching feedback.</Text>
+    <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
+      <View style={commonStyles.heroCard}>
+        <View
+          style={{
+            position: "absolute",
+            right: -34,
+            top: -30,
+            width: 138,
+            height: 138,
+            borderRadius: 69,
+            backgroundColor: "rgba(255, 122, 26, 0.14)",
+          }}
+        />
+        <Text style={commonStyles.eyebrow}>Game Day Dashboard</Text>
+        <Text style={[commonStyles.title, { marginTop: 10 }]}>Welcome Back, {playerName}</Text>
+        <Text style={commonStyles.subtitle}>
+          Load a live drill, review session data, or run a shooting breakdown from one courtside control panel.
+        </Text>
+
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 18 }}>
+          <StatusPill
+            label={`Backend ${backendStatus}`}
+            color={backendStatus === "Connected" ? colors.success : colors.danger}
+          />
+          <StatusPill
+            label={userPersisted ? "Supabase Synced" : "Local Profile"}
+            color={userPersisted ? colors.secondary : colors.warning}
+          />
+        </View>
+
         {playerEmail ? (
-          <Text style={[commonStyles.subtitle, { marginTop: 6 }]}>Email: {playerEmail}</Text>
+          <Text style={[commonStyles.subtitle, { marginTop: 16, color: colors.text }]}>Athlete email: {playerEmail}</Text>
         ) : null}
-        <Text style={{ marginTop: 12, color: backendStatus === "Connected" ? colors.success : colors.danger }}>
-          Backend: {backendStatus}
-        </Text>
-        <Text style={{ marginTop: 6, color: userPersisted ? colors.success : colors.warning }}>
-          User DB: {userPersisted ? "Saved to Supabase" : "Local fallback (Supabase not configured)"}
-        </Text>
       </View>
 
-      <View style={commonStyles.card}>
-        <Text style={commonStyles.label}>Start Coaching Session</Text>
-        <Text style={commonStyles.subtitle}>Choose a movement mode and begin live camera analysis.</Text>
-        <PrimaryButton title="Choose Mode" onPress={() => navigation.navigate("CoachingModes", { playerName, playerEmail })} />
+      <View style={{ flexDirection: "row", gap: 12, marginBottom: 14 }}>
+        <MetricTile label="System" value={backendStatus === "Connected" ? "READY" : "CHECK"} color={colors.secondary} />
+        <MetricTile label="Profile" value={userPersisted ? "SYNCED" : "LOCAL"} color={colors.primary} />
       </View>
 
-      <View style={commonStyles.card}>
-        <Text style={commonStyles.label}>Review Previous Sessions</Text>
-        <Text style={commonStyles.subtitle}>See score, classification, and detected errors from prior runs.</Text>
-        <PrimaryButton title="Open Session History" onPress={() => navigation.navigate("SessionHistory")} />
-      </View>
+      <ActionCard
+        eyebrow="Live Drill"
+        title="Start Coaching Session"
+        description="Choose a mode and open the camera flow for real-time basketball feedback."
+        accentColor={colors.primary}
+        action={<PrimaryButton title="Choose Mode" onPress={() => navigation.navigate("CoachingModes", { playerName, playerEmail })} />}
+      />
+
+      <ActionCard
+        eyebrow="Shot Lab"
+        title="Train Shooting With Video"
+        description="Upload a shooting clip to break down attempts, makes, misses, and overall percentage."
+        accentColor={colors.secondary}
+        action={<PrimaryButton title="Open Shooting Training" onPress={() => navigation.navigate("ShootingTraining")} />}
+      />
+
+      <TouchableOpacity activeOpacity={0.9} onPress={() => navigation.navigate("SessionHistory")} style={commonStyles.card}>
+        <Text style={commonStyles.eyebrow}>Film Room</Text>
+        <Text style={[commonStyles.sectionTitle, { marginTop: 10 }]}>Review Previous Sessions</Text>
+        <Text style={commonStyles.subtitle}>See prior scores, classifications, and summaries from live and video runs.</Text>
+        <Text style={{ marginTop: 16, color: colors.accent, fontWeight: "800", letterSpacing: 0.8 }}>OPEN SESSION HISTORY</Text>
+      </TouchableOpacity>
+    </ScrollView>
+  );
+}
+
+function StatusPill({ label, color }) {
+  return (
+    <View
+      style={[
+        commonStyles.pill,
+        {
+          backgroundColor: "rgba(7, 17, 31, 0.28)",
+          borderColor: color,
+        },
+      ]}
+    >
+      <Text style={[commonStyles.pillText, { color }]}>{label}</Text>
+    </View>
+  );
+}
+
+function MetricTile({ label, value, color }) {
+  return (
+    <View style={commonStyles.metricTile}>
+      <Text style={commonStyles.metricLabel}>{label}</Text>
+      <Text style={[commonStyles.metricValue, { color }]}>{value}</Text>
+    </View>
+  );
+}
+
+function ActionCard({ eyebrow, title, description, accentColor, action }) {
+  return (
+    <View style={[commonStyles.card, { overflow: "hidden" }]}>
+      <View
+        style={{
+          position: "absolute",
+          right: -30,
+          top: -18,
+          width: 110,
+          height: 110,
+          borderRadius: 55,
+          backgroundColor: `${accentColor}22`,
+        }}
+      />
+      <View
+        style={{
+          width: 56,
+          height: 6,
+          borderRadius: 999,
+          backgroundColor: accentColor,
+          marginBottom: 14,
+        }}
+      />
+      <Text style={commonStyles.eyebrow}>{eyebrow}</Text>
+      <Text style={[commonStyles.sectionTitle, { marginTop: 10 }]}>{title}</Text>
+      <Text style={commonStyles.subtitle}>{description}</Text>
+      {action}
     </View>
   );
 }

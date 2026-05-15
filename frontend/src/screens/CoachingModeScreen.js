@@ -7,16 +7,19 @@ const MODES = [
   {
     id: "shooting_form",
     title: "Shooting Form",
+    tag: "Precision",
     description: "Analyze elbow alignment, wrist control, knee bend, and shooting balance.",
   },
   {
     id: "defensive_stance",
     title: "Defensive Stance",
+    tag: "Defense",
     description: "Evaluate stance width, low base, torso readiness, and body balance.",
   },
   {
     id: "footwork",
     title: "Footwork",
+    tag: "Movement",
     description: "Assess spacing, posture stability, movement timing, and coordination.",
   },
 ];
@@ -34,16 +37,20 @@ export default function CoachingModeScreen({ navigation, route }) {
   }
 
   return (
-    <ScrollView style={commonStyles.screen}>
-      <View style={commonStyles.card}>
-        <Text style={commonStyles.title}>Select Mode</Text>
-        <Text style={commonStyles.subtitle}>Choose a coaching mode for this session.</Text>
+    <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
+      <View style={commonStyles.heroCard}>
+        <Text style={commonStyles.eyebrow}>Training Deck</Text>
+        <Text style={[commonStyles.title, { marginTop: 10 }]}>Choose Your Next Drill</Text>
+        <Text style={commonStyles.subtitle}>
+          Build the session around the skill you want to sharpen right now, from shot mechanics to defensive posture.
+        </Text>
       </View>
 
       {MODES.map((mode) => (
         <ModeCard
           key={mode.id}
           title={mode.title}
+          tag={mode.tag}
           description={mode.description}
           onPress={() => openMode(mode)}
         />

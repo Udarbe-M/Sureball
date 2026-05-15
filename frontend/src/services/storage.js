@@ -18,3 +18,18 @@ export async function getLocalSessionHistory() {
     return [];
   }
 }
+
+export async function deleteLocalSessionRecord(sessionId, fallbackKey = null) {
+  const existing = await getLocalSessionHistory();
+  const updated = existing.filter((record) => {
+    if (sessionId && record.id) {
+      return String(record.id) !== String(sessionId);
+    }
+    if (fallbackKey) {
+      const recordKey = record.id || `${record.mode}-${record.timestamp}`;
+      return recordKey !== fallbackKey;
+    }
+    return true;
+  });
+  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(updated));
+}

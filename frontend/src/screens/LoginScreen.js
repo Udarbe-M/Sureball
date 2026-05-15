@@ -36,14 +36,55 @@ export default function LoginScreen({ navigation }) {
   }
 
   return (
-    <View style={[commonStyles.screen, { justifyContent: "center" }]}>
+    <View style={commonStyles.screenCentered}>
+      <View
+        style={{
+          position: "absolute",
+          top: 88,
+          right: -42,
+          width: 180,
+          height: 180,
+          borderRadius: 90,
+          backgroundColor: "rgba(255, 122, 26, 0.14)",
+        }}
+      />
+      <View
+        style={{
+          position: "absolute",
+          bottom: 120,
+          left: -70,
+          width: 220,
+          height: 220,
+          borderRadius: 110,
+          backgroundColor: "rgba(110, 203, 255, 0.1)",
+        }}
+      />
+      <View style={commonStyles.heroCard}>
+        <Text style={commonStyles.eyebrow}>Court Vision</Text>
+        <Text style={[commonStyles.title, { marginTop: 10 }]}>SureBall</Text>
+        <Text style={commonStyles.subtitle}>
+          Step into a sharper basketball training flow with live coaching, shooting analytics, and session review in one place.
+        </Text>
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
+          <View style={commonStyles.pill}>
+            <Text style={commonStyles.pillText}>Live Analysis</Text>
+          </View>
+          <View style={commonStyles.pill}>
+            <Text style={commonStyles.pillText}>Shot Tracking</Text>
+          </View>
+        </View>
+      </View>
+
       <View style={commonStyles.card}>
-        <Text style={commonStyles.title}>SureBall</Text>
-        <Text style={commonStyles.subtitle}>Basketball coaching prototype powered by pose and ball detection.</Text>
-        <Text style={[commonStyles.label, { marginTop: 16 }]}>Player Name</Text>
+        <Text style={commonStyles.eyebrow}>Player Entry</Text>
+        <Text style={[commonStyles.sectionTitle, { marginTop: 10 }]}>Get Session Ready</Text>
+        <Text style={commonStyles.subtitle}>Set your athlete profile before opening the training dashboard.</Text>
+
+        <Text style={[commonStyles.label, { marginTop: 18 }]}>Player Name</Text>
         <TextInput
           style={commonStyles.input}
           placeholder="Enter your name"
+          placeholderTextColor={colors.muted}
           value={name}
           onChangeText={setName}
           autoCapitalize="words"
@@ -52,6 +93,7 @@ export default function LoginScreen({ navigation }) {
         <TextInput
           style={commonStyles.input}
           placeholder="Enter your email"
+          placeholderTextColor={colors.muted}
           value={email}
           onChangeText={setEmail}
           autoCapitalize="none"
@@ -62,7 +104,7 @@ export default function LoginScreen({ navigation }) {
             {message}
           </Text>
         ) : null}
-        <PrimaryButton title="Login" onPress={handleLogin} loading={saving} />
+        <PrimaryButton title="Open Dashboard" onPress={handleLogin} loading={saving} />
       </View>
     </View>
   );
