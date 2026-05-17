@@ -23,7 +23,8 @@
         {
           "cameraPermission": "Allow SureBall to access your camera for live coaching analysis."
         }
-      ]
+      ],
+      "expo-video"
     ],
     "extra": {
       "backendUrl": "http://127.0.0.1:8000",

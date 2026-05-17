@@ -1,5 +1,7 @@
+import { useEvent } from "expo";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
+import { VideoView, useVideoPlayer } from "expo-video";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Linking, ScrollView, Switch, Text, TouchableOpacity, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
@@ -8,11 +10,6 @@ import { commonStyles } from "../theme/styles";
 import { colors } from "../theme/colors";
 
 const OVERLAY_OPTIONS = [
-  {
-    id: "focus_stats",
-    title: "Stats + Make Alerts",
-    description: "Recommended. Keep the result readable while still highlighting made baskets.",
-  },
   {
     id: "full_tracking",
     title: "Full Tracking",
@@ -35,7 +32,7 @@ const INITIAL_STATS = {
 export default function ShootingTrainingScreen() {
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [videoSource, setVideoSource] = useState("upload");
-  const [overlayMode, setOverlayMode] = useState("focus_stats");
+  const [overlayMode, setOverlayMode] = useState("stats_only");
   const [testMode, setTestMode] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState("idle");
@@ -91,6 +88,12 @@ export default function ShootingTrainingScreen() {
     () => OVERLAY_OPTIONS.find((item) => item.id === overlayMode),
     [overlayMode]
   );
+  const resultVideoUrl = useMemo(() => {
+    if (!jobId || status !== "completed") {
+      return null;
+    }
+    return buildShootingTrainingDownloadUrl(jobId);
+  }, [jobId, status]);
 
   const selectedVideoLabel = useMemo(() => {
     if (!selectedVideo) {
@@ -403,11 +406,79 @@ export default function ShootingTrainingScreen() {
           <Text style={{ marginTop: 12, color: colors.danger, fontSize: 13 }}>{errorMessage}</Text>
         ) : null}
 
-        {status === "completed" ? (
-          <PrimaryButton title="Open Annotated Result Video" onPress={openResultVideo} />
+        {resultVideoUrl ? (
+          <>
+            <View
+              style={{
+                marginTop: 16,
+                overflow: "hidden",
+                borderRadius: 20,
+                borderWidth: 1,
+                borderColor: colors.border,
+                backgroundColor: "#040b15",
+              }}
+            >
+              <ResultVideoPlayer videoUrl={resultVideoUrl} />
+            </View>
+            <Text style={[commonStyles.subtitle, { marginTop: 10, fontSize: 12 }]}>
+              Review the annotated output here, then download the file if you want to save or share it.
+            </Text>
+            <PrimaryButton title="Download Video" onPress={openResultVideo} />
+          </>
         ) : null}
       </View>
     </ScrollView>
+  );
+}
+
+function ResultVideoPlayer({ videoUrl }) {
+  const player = useVideoPlayer(
+    {
+      uri: videoUrl,
+      useCaching: true,
+    },
+    (instance) => {
+      instance.loop = true;
+      instance.play();
+    }
+  );
+  const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
+
+  return (
+    <View>
+      <VideoView
+        style={{ width: "100%", height: 320, backgroundColor: "#040b15" }}
+        player={player}
+        nativeControls
+        allowsFullscreen
+        contentFit="contain"
+      />
+      <View style={{ padding: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onPress={() => {
+            if (isPlaying) {
+              player.pause();
+            } else {
+              player.play();
+            }
+          }}
+          style={{
+            borderRadius: 14,
+            borderWidth: 1,
+            borderColor: colors.primary,
+            backgroundColor: "rgba(255, 122, 26, 0.12)",
+            paddingVertical: 12,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text style={{ color: colors.primary, fontSize: 14, fontWeight: "800" }}>
+            {isPlaying ? "Pause Preview" : "Play Preview"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    </View>
   );
 }
 

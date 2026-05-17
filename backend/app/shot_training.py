@@ -34,7 +34,7 @@ SHOT_TRAINING_CONFIDENCE_OVERRIDES = {
     "player_shooting": 0.62,
     "ball_in_basket": 0.25,
 }
-ANNOTATED_VIDEO_CRF = 17
+ANNOTATED_VIDEO_CRF = 14
 ANNOTATED_VIDEO_PRESET = "slow"
 
 SHOT_TRAINING_COLORS = {
@@ -123,13 +123,17 @@ class AnnotatedVideoWriter:
     def write(self, frame: np.ndarray) -> None:
         if frame.shape[1] != self.frame_size[0] or frame.shape[0] != self.frame_size[1]:
             raise RuntimeError("Annotated frame size changed during export.")
+        frame = np.ascontiguousarray(frame)
 
         if self._ffmpeg_process is not None:
             stdin = self._ffmpeg_process.stdin
             if stdin is None:
                 raise RuntimeError("Annotated result encoder is no longer available.")
             try:
-                stdin.write(frame.tobytes())
+                frame_bytes = frame.tobytes()
+                bytes_written = stdin.write(frame_bytes)
+                if bytes_written != len(frame_bytes):
+                    raise RuntimeError("Annotated result encoder received an incomplete frame.")
             except BrokenPipeError as exc:
                 raise RuntimeError(self._ffmpeg_failure_message()) from exc
             return
@@ -202,6 +206,65 @@ def _resolve_ffmpeg_exe() -> Optional[str]:
         return get_ffmpeg_exe()
     except Exception:
         return None
+
+
+def _enable_capture_auto_orientation(capture: cv2.VideoCapture) -> bool:
+    orientation_auto_prop = getattr(cv2, "CAP_PROP_ORIENTATION_AUTO", None)
+    if orientation_auto_prop is None:
+        return False
+    try:
+        return bool(capture.set(orientation_auto_prop, 1))
+    except Exception:
+        return False
+
+
+def _read_capture_orientation(capture: cv2.VideoCapture) -> int:
+    orientation_meta_prop = getattr(cv2, "CAP_PROP_ORIENTATION_META", None)
+    if orientation_meta_prop is None:
+        return 0
+    try:
+        return int(round(capture.get(orientation_meta_prop) or 0)) % 360
+    except Exception:
+        return 0
+
+
+def _apply_orientation_correction(
+    frame: np.ndarray,
+    orientation_degrees: int,
+    *,
+    auto_orientation_enabled: bool,
+    encoded_frame_size: tuple[int, int],
+) -> np.ndarray:
+    normalized_orientation = orientation_degrees % 360
+    if normalized_orientation == 0:
+        return frame
+
+    frame_height, frame_width = frame.shape[:2]
+    encoded_width, encoded_height = encoded_frame_size
+
+    # OpenCV may expose the raw encoded frame while mobile players rely on rotation metadata.
+    # If auto-rotation was not applied, normalize frames ourselves before analysis/export.
+    needs_manual_rotation = not auto_orientation_enabled
+    if not needs_manual_rotation and normalized_orientation in {90, 270}:
+        needs_manual_rotation = (
+            frame_width == encoded_width
+            and frame_height == encoded_height
+            and encoded_width > 0
+            and encoded_height > 0
+        )
+
+    if not needs_manual_rotation:
+        return frame
+
+    rotation_map = {
+        90: cv2.ROTATE_90_CLOCKWISE,
+        180: cv2.ROTATE_180,
+        270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+    }
+    rotate_code = rotation_map.get(normalized_orientation)
+    if rotate_code is None:
+        return frame
+    return cv2.rotate(frame, rotate_code)
 
 
 class ShotTrainingTracker:
@@ -331,8 +394,8 @@ class ShotTrainingJob:
                 raise RuntimeError("Unable to open the selected video.")
 
             fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
-            frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-            frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            encoded_frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            encoded_frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
             total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
             max_frames = total_frames
             if max_frames <= 0:
@@ -341,8 +404,23 @@ class ShotTrainingJob:
                 duration_limit = TEST_MODE_SECONDS if self.test_mode else MAX_VIDEO_SECONDS
                 max_frames = min(max_frames, int(fps * duration_limit))
 
-            if frame_width <= 0 or frame_height <= 0:
+            if encoded_frame_width <= 0 or encoded_frame_height <= 0:
                 raise RuntimeError("Unable to read the selected video's frame size.")
+
+            auto_orientation_enabled = _enable_capture_auto_orientation(capture)
+            orientation_degrees = _read_capture_orientation(capture)
+
+            success, first_frame = capture.read()
+            if not success or first_frame is None:
+                raise RuntimeError("Unable to read frames from the selected video.")
+
+            first_frame = _apply_orientation_correction(
+                first_frame,
+                orientation_degrees,
+                auto_orientation_enabled=auto_orientation_enabled,
+                encoded_frame_size=(encoded_frame_width, encoded_frame_height),
+            )
+            frame_height, frame_width = first_frame.shape[:2]
 
             writer = AnnotatedVideoWriter(
                 output_path=self.output_path,
@@ -361,10 +439,8 @@ class ShotTrainingJob:
             )
 
             frame_index = 0
-            while capture.isOpened() and frame_index < max_frames:
-                success, frame = capture.read()
-                if not success:
-                    break
+            frame = first_frame
+            while frame_index < max_frames:
 
                 detections = self.detector.detect_training_objects(
                     frame,
@@ -391,6 +467,19 @@ class ShotTrainingJob:
                         progress_percentage=int((frame_index / max(max_frames, 1)) * 100),
                         stats=tracker.to_stats(),
                     )
+
+                if frame_index >= max_frames:
+                    break
+
+                success, next_frame = capture.read()
+                if not success or next_frame is None:
+                    break
+                frame = _apply_orientation_correction(
+                    next_frame,
+                    orientation_degrees,
+                    auto_orientation_enabled=auto_orientation_enabled,
+                    encoded_frame_size=(encoded_frame_width, encoded_frame_height),
+                )
 
             writer.close()
             writer = None
