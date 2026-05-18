@@ -5,9 +5,11 @@ import { VideoView, useVideoPlayer } from "expo-video";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Linking, ScrollView, Switch, Text, TouchableOpacity, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
+import { useAuth } from "../context/AuthContext";
 import { buildShootingTrainingDownloadUrl, fetchShootingTrainingStatus, startShootingTraining } from "../services/api";
 import { commonStyles } from "../theme/styles";
 import { colors } from "../theme/colors";
+import { buildUserKey } from "../utils/userKey";
 
 const OVERLAY_OPTIONS = [
   {
@@ -30,6 +32,7 @@ const INITIAL_STATS = {
 };
 
 export default function ShootingTrainingScreen() {
+  const { playerEmail, playerName, userId } = useAuth();
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [videoSource, setVideoSource] = useState("upload");
   const [overlayMode, setOverlayMode] = useState("stats_only");
@@ -47,6 +50,10 @@ export default function ShootingTrainingScreen() {
   const [recordingStatus, setRecordingStatus] = useState("Ready to record a new clip.");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
+  const userKey = useMemo(
+    () => buildUserKey({ userId, playerName, playerEmail }),
+    [playerEmail, playerName, userId]
+  );
 
   useEffect(() => {
     if (!jobId || status !== "processing") {
@@ -201,6 +208,7 @@ export default function ShootingTrainingScreen() {
         videoAsset: selectedVideo,
         overlayMode,
         testMode,
+        userKey,
       });
       setJobId(result.file_id);
       setStatus("processing");

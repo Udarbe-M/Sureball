@@ -151,19 +151,30 @@ def append_session_history(record: Dict[str, object]) -> None:
     SESSION_HISTORY_PATH.write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
 
 
-def load_session_history() -> List[Dict[str, object]]:
+def load_session_history(user_key: Optional[str] = None) -> List[Dict[str, object]]:
     ensure_data_dir()
     raw = SESSION_HISTORY_PATH.read_text(encoding="utf-8").strip()
     if not raw:
         return []
-    return json.loads(raw)
+    history = json.loads(raw)
+    if user_key is None:
+        return history
+    return [record for record in history if str(record.get("user_key") or "") == str(user_key)]
 
 
-def delete_session_history_record(session_id: str) -> bool:
+def delete_session_history_record(session_id: str, user_key: Optional[str] = None) -> bool:
     ensure_data_dir()
     history = load_session_history()
-    updated_history = [record for record in history if str(record.get("session_id")) != session_id]
-    if len(updated_history) == len(history):
+    updated_history = []
+    deleted = False
+    for record in history:
+        matches_session = str(record.get("session_id")) == session_id
+        matches_user = user_key is None or str(record.get("user_key") or "") == str(user_key)
+        if matches_session and matches_user:
+            deleted = True
+            continue
+        updated_history.append(record)
+    if not deleted:
         return False
     SESSION_HISTORY_PATH.write_text(json.dumps(updated_history, indent=2, default=str), encoding="utf-8")
     return True

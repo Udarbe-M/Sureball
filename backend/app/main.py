@@ -10,10 +10,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .ball_detector import BallDetector
+from .coaching_analysis import run_coaching_analysis
+from .coaching_video import (
+    ensure_coaching_video_dirs,
+    get_coaching_video_output_path,
+    get_coaching_video_status,
+    start_coaching_video_job,
+)
 from .feedback_engine import extract_features, generate_feedback
+from .one_euro import LandmarkSmoother
 from .pose_estimator import PoseEstimator
 from .scoring import calculate_score, classify_score
 from .schemas import (
+    CoachingVideoStartResponse,
+    CoachingVideoStatusResponse,
     FeedbackCue,
     FrameAnalysisResponse,
     ModeInfo,
@@ -32,9 +42,7 @@ from .utils import (
     append_session_history,
     decode_image_bytes,
     delete_session_history_record,
-    draw_text_block,
     ensure_data_dir,
-    frame_to_base64,
     load_session_history,
     new_session_id,
     now_utc,
@@ -57,6 +65,7 @@ app.add_middleware(
 
 ensure_data_dir()
 ensure_shot_training_dirs()
+ensure_coaching_video_dirs()
 pose_estimator = PoseEstimator()
 ball_detector = BallDetector()
 
@@ -100,14 +109,14 @@ def get_modes() -> List[ModeInfo]:
 
 
 @app.get("/sessions", response_model=List[SessionRecord])
-def get_sessions() -> List[SessionRecord]:
-    records = load_session_history()
+def get_sessions(user_key: str) -> List[SessionRecord]:
+    records = load_session_history(user_key=user_key)
     return [SessionRecord(**record) for record in reversed(records)]
 
 
 @app.delete("/sessions/{session_id}", response_model=dict)
-def delete_session(session_id: str) -> dict:
-    deleted = delete_session_history_record(session_id)
+def delete_session(session_id: str, user_key: str) -> dict:
+    deleted = delete_session_history_record(session_id, user_key=user_key)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session record not found.")
     return {"status": "deleted", "session_id": session_id}
@@ -118,6 +127,7 @@ async def start_shooting_training(
     video: UploadFile = File(...),
     overlay_mode: str = Form("focus_stats"),
     test_mode: bool = Form(False),
+    user_key: str = Form(...),
 ) -> ShotTrainingStartResponse:
     if not ball_detector.ready:
         raise HTTPException(status_code=503, detail="Ball detector model is not ready.")
@@ -136,12 +146,66 @@ async def start_shooting_training(
         video=video,
         overlay_mode=overlay_mode,
         test_mode=test_mode,
+        user_key=user_key,
     )
     return ShotTrainingStartResponse(
         file_id=str(job["file_id"]),
         status=str(job["status"]),
         overlay_mode=str(job["overlay_mode"]),
         test_mode=bool(job["test_mode"]),
+    )
+
+
+@app.post("/coaching-video/start", response_model=CoachingVideoStartResponse)
+async def start_coaching_video(
+    mode: str = Form(...),
+    video: UploadFile = File(...),
+    overlay_mode: str = Form("focus_feedback"),
+    test_mode: bool = Form(False),
+    user_key: str = Form(...),
+) -> CoachingVideoStartResponse:
+    if mode not in {item.id for item in MODE_LIBRARY}:
+        raise HTTPException(status_code=400, detail="Invalid coaching mode.")
+    if not ball_detector.ready:
+        raise HTTPException(status_code=503, detail="Ball detector model is not ready.")
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(status_code=400, detail="Please upload a video file.")
+    if overlay_mode not in {"full_overlay", "focus_feedback", "score_only"}:
+        raise HTTPException(status_code=400, detail="Invalid coaching video overlay mode.")
+
+    job = start_coaching_video_job(
+        mode=mode,
+        pose_estimator=pose_estimator,
+        ball_detector=ball_detector,
+        video=video,
+        overlay_mode=overlay_mode,
+        test_mode=test_mode,
+        user_key=user_key,
+    )
+    return CoachingVideoStartResponse(
+        file_id=str(job["file_id"]),
+        mode=str(job["mode"]),
+        status=str(job["status"]),
+        overlay_mode=str(job["overlay_mode"]),
+        test_mode=bool(job["test_mode"]),
+    )
+
+
+@app.get("/coaching-video/status/{file_id}", response_model=CoachingVideoStatusResponse)
+def get_coaching_video_job_status(file_id: str) -> CoachingVideoStatusResponse:
+    job = get_coaching_video_status(file_id)
+    return CoachingVideoStatusResponse(**job)
+
+
+@app.get("/coaching-video/download/{file_id}")
+def download_coaching_video_result(file_id: str) -> FileResponse:
+    output_path = get_coaching_video_output_path(file_id)
+    if output_path is None:
+        raise HTTPException(status_code=404, detail="Annotated coaching result video is not ready yet.")
+    return FileResponse(
+        path=output_path,
+        media_type="video/mp4",
+        filename=f"sureball-coaching-{file_id}.mp4",
     )
 
 
@@ -167,6 +231,7 @@ def download_shooting_training_result(file_id: str) -> FileResponse:
 @app.post("/analyze/frame", response_model=FrameAnalysisResponse, include_in_schema=False)
 async def analyze_frame(
     mode: str = Form(...),
+    user_key: str = Form(...),
     frame: UploadFile = File(...),
 ) -> FrameAnalysisResponse:
     if mode not in {item.id for item in MODE_LIBRARY}:
@@ -178,7 +243,14 @@ async def analyze_frame(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Unable to decode uploaded frame.") from exc
 
-    result = _analyze_single_frame(np_frame, mode=mode, session_id=new_session_id(), frame_index=0)
+    result = run_coaching_analysis(
+        np_frame,
+        mode=mode,
+        session_id=new_session_id(),
+        frame_index=0,
+        pose_estimator=pose_estimator,
+        ball_detector=ball_detector,
+    )["response"]
     _save_session_record(
         session_id=result.session_id,
         mode=result.mode,
@@ -186,6 +258,7 @@ async def analyze_frame(
         classification=result.score.classification,
         summary=result.coaching_summary,
         source_type="frame",
+        user_key=user_key,
     )
     return result
 
@@ -194,6 +267,7 @@ async def analyze_frame(
 @app.post("/analyze/video", response_model=VideoAnalysisResponse, include_in_schema=False)
 async def analyze_video(
     mode: str = Form(...),
+    user_key: str = Form(...),
     video: UploadFile = File(...),
     sample_stride: int = Form(5),
 ) -> VideoAnalysisResponse:
@@ -214,6 +288,8 @@ async def analyze_video(
     frame_index = 0
     processed_frames = 0
     sampled_results: List[FrameAnalysisResponse] = []
+    fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+    landmark_smoother = LandmarkSmoother(min_cutoff=1.2, beta=0.03, derivative_cutoff=1.0)
 
     try:
         while True:
@@ -223,7 +299,16 @@ async def analyze_video(
             processed_frames += 1
             if frame_index % max(sample_stride, 1) == 0:
                 sampled_results.append(
-                    _analyze_single_frame(frame, mode=mode, session_id=session_id, frame_index=frame_index)
+                    run_coaching_analysis(
+                        frame,
+                        mode=mode,
+                        session_id=session_id,
+                        frame_index=frame_index,
+                        pose_estimator=pose_estimator,
+                        ball_detector=ball_detector,
+                        landmark_smoother=landmark_smoother,
+                        timestamp_seconds=frame_index / max(fps, 1.0),
+                    )["response"]
                 )
             frame_index += 1
     finally:
@@ -277,69 +362,9 @@ async def analyze_video(
         classification=response.classification,
         summary=response.session_summary,
         source_type="video",
+        user_key=user_key,
     )
     return response
-
-
-def _analyze_single_frame(frame, mode: str, session_id: str, frame_index: int) -> FrameAnalysisResponse:
-    pose_result = pose_estimator.detect(frame)
-    ball_box = ball_detector.detect(frame)
-    features = extract_features(mode=mode, landmarks=pose_result["landmarks"], ball_box=ball_box)
-    feedback, summary = generate_feedback(mode=mode, features=features, ball_detected=ball_box is not None)
-    if not pose_result["pose_detected"]:
-        feedback.insert(
-            0,
-            FeedbackCue(
-                code="pose_not_detected",
-                message="Step fully into frame so your body landmarks can be tracked.",
-                severity="high",
-                deduction=18,
-            ),
-        )
-    score = calculate_score(feedback)
-
-    annotated = pose_estimator.draw(frame, pose_result["raw_landmarks"])
-    if ball_box:
-        cv2.rectangle(
-            annotated,
-            (int(ball_box["x1"]), int(ball_box["y1"])),
-            (int(ball_box["x2"]), int(ball_box["y2"])),
-            (0, 165, 255),
-            2,
-        )
-        cv2.putText(
-            annotated,
-            f"Basketball {ball_box['confidence']:.2f}",
-            (int(ball_box["x1"]), max(12, int(ball_box["y1"]) - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 165, 255),
-            2,
-            cv2.LINE_AA,
-        )
-
-    text_lines = [
-        f"Mode: {mode.replace('_', ' ').title()}",
-        f"Score: {score.score} ({score.classification})",
-        f"Cue: {feedback[0].message}",
-    ]
-    annotated = draw_text_block(annotated, text_lines)
-
-    return FrameAnalysisResponse(
-        session_id=session_id,
-        mode=mode,
-        timestamp=now_utc(),
-        frame_index=frame_index,
-        pose_detected=bool(pose_result["pose_detected"]),
-        ball_detected=ball_box is not None,
-        features=features,
-        feedback=feedback,
-        score=score,
-        coaching_summary=summary,
-        ball_box=ball_box,
-        landmarks=pose_result["landmarks"],
-        annotated_frame_base64=frame_to_base64(annotated),
-    )
 
 
 def _save_session_record(
@@ -349,6 +374,7 @@ def _save_session_record(
     classification: str,
     summary: str,
     source_type: str,
+    user_key: str,
 ) -> None:
     append_session_history(
         {
@@ -359,5 +385,6 @@ def _save_session_record(
             "classification": classification,
             "summary": summary,
             "source_type": source_type,
+            "user_key": user_key,
         }
     )

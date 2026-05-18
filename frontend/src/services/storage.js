@@ -1,15 +1,19 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-const SESSION_KEY = "sureball_session_history_v1";
+const SESSION_KEY_PREFIX = "sureball_session_history_v2";
 
-export async function saveSessionRecord(record) {
-  const existing = await getLocalSessionHistory();
-  const updated = [record, ...existing].slice(0, 100);
-  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(updated));
+function sessionKeyForUser(userKey) {
+  return `${SESSION_KEY_PREFIX}:${String(userKey || "anonymous")}`;
 }
 
-export async function getLocalSessionHistory() {
-  const raw = await AsyncStorage.getItem(SESSION_KEY);
+export async function saveSessionRecord(userKey, record) {
+  const existing = await getLocalSessionHistory(userKey);
+  const updated = [record, ...existing].slice(0, 100);
+  await AsyncStorage.setItem(sessionKeyForUser(userKey), JSON.stringify(updated));
+}
+
+export async function getLocalSessionHistory(userKey) {
+  const raw = await AsyncStorage.getItem(sessionKeyForUser(userKey));
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
@@ -19,8 +23,8 @@ export async function getLocalSessionHistory() {
   }
 }
 
-export async function deleteLocalSessionRecord(sessionId, fallbackKey = null) {
-  const existing = await getLocalSessionHistory();
+export async function deleteLocalSessionRecord(userKey, sessionId, fallbackKey = null) {
+  const existing = await getLocalSessionHistory(userKey);
   const updated = existing.filter((record) => {
     if (sessionId && record.id) {
       return String(record.id) !== String(sessionId);
@@ -31,5 +35,5 @@ export async function deleteLocalSessionRecord(sessionId, fallbackKey = null) {
     }
     return true;
   });
-  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(updated));
+  await AsyncStorage.setItem(sessionKeyForUser(userKey), JSON.stringify(updated));
 }

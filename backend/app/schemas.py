@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 CoachingMode = Literal["shooting_form", "defensive_stance", "basic_footwork", "shot_training"]
 ShotTrainingOverlayMode = Literal["full_tracking", "focus_stats", "stats_only"]
 ShotTrainingStatus = Literal["queued", "processing", "completed", "error", "not_found"]
+CoachingVideoOverlayMode = Literal["full_overlay", "focus_feedback", "score_only"]
+CoachingVideoStatus = Literal["queued", "processing", "completed", "error", "not_found"]
 
 
 class Point2D(BaseModel):
@@ -93,6 +95,7 @@ class SessionRecord(BaseModel):
     classification: str
     summary: str
     source_type: Literal["frame", "video", "shot_training_video"]
+    user_key: Optional[str] = None
 
 
 class ModeInfo(BaseModel):
@@ -129,6 +132,33 @@ class ShotTrainingStatusResponse(BaseModel):
     total_frames: int = 0
     progress_percentage: int = 0
     stats: ShotTrainingStats = Field(default_factory=ShotTrainingStats)
+    classification: Optional[str] = None
+    summary: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+class CoachingVideoStartResponse(BaseModel):
+    file_id: str
+    mode: CoachingMode
+    status: CoachingVideoStatus
+    overlay_mode: CoachingVideoOverlayMode
+    test_mode: bool = False
+
+
+class CoachingVideoStatusResponse(BaseModel):
+    file_id: str
+    mode: Optional[CoachingMode] = None
+    status: CoachingVideoStatus
+    overlay_mode: Optional[CoachingVideoOverlayMode] = None
+    test_mode: bool = False
+    processed_frames: int = 0
+    total_frames: int = 0
+    progress_percentage: int = 0
+    analyzed_frames: int = 0
+    average_score: float = 0.0
+    best_score: int = 0
+    worst_score: int = 0
+    dominant_feedback: List[str] = Field(default_factory=list)
     classification: Optional[str] = None
     summary: Optional[str] = None
     error_message: Optional[str] = None

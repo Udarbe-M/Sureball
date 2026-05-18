@@ -1,392 +1,581 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  ActivityIndicator,
-  Image,
-  ScrollView,
-  Text,
-  TouchableOpacity,
-  View,
-} from "react-native";
+import { useEvent } from "expo";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { commonStyles } from "../theme/styles";
+import * as DocumentPicker from "expo-document-picker";
+import { VideoView, useVideoPlayer } from "expo-video";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Linking, ScrollView, Switch, Text, TouchableOpacity, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
-import { analyzeFrame } from "../services/api";
+import { useAuth } from "../context/AuthContext";
+import {
+  buildCoachingVideoDownloadUrl,
+  fetchCoachingVideoStatus,
+  startCoachingVideoAnalysis,
+} from "../services/api";
 import { saveSessionRecord } from "../services/storage";
 import { colors } from "../theme/colors";
-import { normalizeClassification } from "../utils/helpers";
+import { commonStyles } from "../theme/styles";
+import { buildUserKey } from "../utils/userKey";
 
-function formatBallZone(zone) {
-  if (!zone) {
-    return "Waiting";
-  }
-  if (zone === "high") {
-    return "High";
-  }
-  if (zone === "torso") {
-    return "Pocket";
-  }
-  return "Low";
-}
-
-function describeBallControl(distanceValue) {
-  if (typeof distanceValue !== "number") {
-    return "Waiting";
-  }
-  if (distanceValue <= 0.42) {
-    return "Tight";
-  }
-  if (distanceValue <= 0.72) {
-    return "Stable";
-  }
-  return "Loose";
-}
-
-function TrackingBadge({ label, value, tone = "neutral" }) {
-  const accentColor =
-    tone === "success" ? colors.success : tone === "warning" ? colors.warning : colors.secondary;
-
-  return (
-    <View
-      style={{
-        paddingHorizontal: 12,
-        paddingVertical: 9,
-        borderRadius: 999,
-        borderWidth: 1,
-        borderColor: accentColor,
-        backgroundColor: "rgba(7, 17, 31, 0.82)",
-      }}
-    >
-      <Text style={{ color: colors.muted, fontSize: 10, fontWeight: "800", letterSpacing: 1 }}>
-        {label}
-      </Text>
-      <Text style={{ color: colors.text, fontSize: 13, fontWeight: "800", marginTop: 3 }}>{value}</Text>
-    </View>
-  );
-}
+const OVERLAY_OPTIONS = [
+  {
+    id: "full_overlay",
+    title: "Full Overlay",
+    description: "Show pose landmarks, ball tracking, score, and feedback on the analyzed video.",
+  },
+  {
+    id: "focus_feedback",
+    title: "Focus Feedback",
+    description: "Prioritize coaching cues and score panels with a cleaner training-video presentation.",
+  },
+  {
+    id: "score_only",
+    title: "Score Only",
+    description: "Keep the output clean with the scoreboard and footer only.",
+  },
+];
 
 export default function LiveAnalysisScreen({ route }) {
+  const { playerEmail, playerName, userId } = useAuth();
   const mode = route.params?.mode || { id: "shooting_form", title: "Shooting Form" };
-  const playerName = route.params?.playerName || "Student Athlete";
-  const playerEmail = route.params?.playerEmail || null;
-
-  const [permission, requestPermission] = useCameraPermissions();
+  const [selectedVideo, setSelectedVideo] = useState(null);
+  const [videoSource, setVideoSource] = useState("upload");
+  const [overlayMode, setOverlayMode] = useState("focus_feedback");
+  const [testMode, setTestMode] = useState(false);
+  const [jobId, setJobId] = useState(null);
+  const [status, setStatus] = useState("idle");
+  const [progress, setProgress] = useState(0);
+  const [analyzedFrames, setAnalyzedFrames] = useState(0);
+  const [averageScore, setAverageScore] = useState(0);
+  const [bestScore, setBestScore] = useState(0);
+  const [worstScore, setWorstScore] = useState(0);
+  const [classification, setClassification] = useState("");
+  const [summary, setSummary] = useState("");
+  const [dominantFeedback, setDominantFeedback] = useState([]);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [starting, setStarting] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordingStatus, setRecordingStatus] = useState("Ready to record a coaching drill.");
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [feedbackText, setFeedbackText] = useState("Ready to analyze.");
-  const [score, setScore] = useState(100);
-  const [classification, setClassification] = useState("Excellent");
-  const [errors, setErrors] = useState([]);
-  const [annotatedFrame, setAnnotatedFrame] = useState(null);
-  const [lastSessionId, setLastSessionId] = useState(null);
-  const [latestAnalysis, setLatestAnalysis] = useState(null);
-  const [previewMode, setPreviewMode] = useState("camera");
-
-  const modeLabel = useMemo(() => mode?.title || "Coaching", [mode]);
-  const landmarkCount = useMemo(
-    () => Object.keys(latestAnalysis?.landmarks || {}).length,
-    [latestAnalysis]
+  const userKey = useMemo(
+    () => buildUserKey({ userId, playerName, playerEmail }),
+    [playerEmail, playerName, userId]
   );
-  const ballConfidence = latestAnalysis?.ball_box?.confidence ?? null;
-  const ballZone = formatBallZone(latestAnalysis?.features?.ball_vertical_zone);
-  const ballControl = describeBallControl(latestAnalysis?.features?.ball_to_wrist_distance);
-  const overlayReady = Boolean(annotatedFrame && latestAnalysis);
 
   useEffect(() => {
-    if (!permission) {
-      return;
-    }
-    if (!permission.granted) {
-      requestPermission();
-    }
-  }, [permission, requestPermission]);
-
-  async function captureAndAnalyzeFrame() {
-    if (!cameraRef.current || isAnalyzing) {
-      return;
+    if (!jobId || status !== "processing") {
+      return undefined;
     }
 
-    setIsAnalyzing(true);
-    try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.5,
-        skipProcessing: true,
-      });
-      const result = await analyzeFrame({ mode: mode.id, photoUri: photo.uri });
-      const firstCue = result.feedback?.[0]?.message || "No cue available.";
-      const scoreValue = result.score?.score ?? 0;
-      const normalizedClassification = normalizeClassification(result.score?.classification);
-      const detectedErrors = (result.feedback || [])
-        .filter((item) => item.deduction > 0)
-        .map((item) => ({
-          issue: item.message,
-          severity:
-            item.severity === "high" ? "Major" : item.severity === "medium" ? "Moderate" : "Minor",
-          deduction: item.deduction,
-        }));
+    const timer = setInterval(async () => {
+      try {
+        const result = await fetchCoachingVideoStatus(jobId);
+        setProgress(result.progress_percentage || 0);
+        setAnalyzedFrames(result.analyzed_frames || 0);
+        setAverageScore(result.average_score || 0);
+        setBestScore(result.best_score || 0);
+        setWorstScore(result.worst_score || 0);
+        setClassification(result.classification || "");
+        setSummary(result.summary || "");
+        setDominantFeedback(result.dominant_feedback || []);
 
-      setFeedbackText(firstCue);
-      setScore(scoreValue);
-      setClassification(normalizedClassification);
-      setErrors(detectedErrors);
-      setLastSessionId(result.session_id);
-      setLatestAnalysis(result);
-
-      if (result.annotated_frame_base64) {
-        setAnnotatedFrame(`data:image/jpeg;base64,${result.annotated_frame_base64}`);
-        setPreviewMode("analysis");
-      } else {
-        setAnnotatedFrame(null);
-        setPreviewMode("camera");
+        if (result.status === "completed") {
+          setStatus("completed");
+          await saveSessionRecord(userKey, {
+            id: result.file_id,
+            userKey,
+            playerName,
+            playerEmail,
+            mode: mode.id,
+            modeLabel: mode.title,
+            score: result.average_score || 0,
+            classification: result.classification || "Needs Improvement",
+            detectedErrors: (result.dominant_feedback || []).map((message) => ({
+              issue: message,
+              severity: "Moderate",
+            })),
+            timestamp: new Date().toISOString(),
+            summary: result.summary || "",
+          });
+        } else if (result.status === "error") {
+          setStatus("error");
+          setErrorMessage(result.error_message || "Coaching video analysis failed.");
+        }
+      } catch (error) {
+        setStatus("error");
+        setErrorMessage(String(error.message || error));
       }
+    }, 1500);
 
-      await saveSessionRecord({
-        id: result.session_id,
-        playerName,
-        playerEmail,
-        mode: mode.id,
-        modeLabel: mode.title,
-        score: scoreValue,
-        classification: normalizedClassification,
-        detectedErrors,
-        timestamp: new Date().toISOString(),
+    return () => clearInterval(timer);
+  }, [jobId, mode.id, mode.title, playerEmail, playerName, status, userKey]);
+
+  useEffect(() => {
+    return () => {
+      if (cameraRef.current && recording) {
+        cameraRef.current.stopRecording();
+      }
+    };
+  }, [recording]);
+
+  const selectedOverlay = useMemo(
+    () => OVERLAY_OPTIONS.find((item) => item.id === overlayMode),
+    [overlayMode]
+  );
+  const resultVideoUrl = useMemo(() => {
+    if (!jobId || status !== "completed") {
+      return null;
+    }
+    return buildCoachingVideoDownloadUrl(jobId);
+  }, [jobId, status]);
+  const selectedVideoLabel = useMemo(() => {
+    if (!selectedVideo) {
+      return "No coaching clip selected yet.";
+    }
+    return selectedVideo.name || (videoSource === "camera" ? "Recorded coaching drill" : "Chosen coaching clip");
+  }, [selectedVideo, videoSource]);
+
+  async function pickVideo() {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: "video/*",
+      copyToCacheDirectory: true,
+    });
+    if (result.canceled) {
+      return;
+    }
+
+    setVideoSource("upload");
+    setSelectedVideo(result.assets[0]);
+    setCameraOpen(false);
+    resetRunState();
+  }
+
+  async function openCameraRecorder() {
+    if (!cameraPermission?.granted) {
+      const permissionResult = await requestCameraPermission();
+      if (!permissionResult.granted) {
+        setErrorMessage("Camera permission is required to record a coaching drill.");
+        return;
+      }
+    }
+
+    setVideoSource("camera");
+    setCameraOpen(true);
+    setRecordingStatus("Frame the athlete fully, then start recording.");
+    setErrorMessage("");
+  }
+
+  async function startRecordingClip() {
+    if (!cameraRef.current || recording) {
+      return;
+    }
+
+    setErrorMessage("");
+    setRecording(true);
+    setRecordingStatus("Recording in progress...");
+
+    try {
+      const result = await cameraRef.current.recordAsync({
+        maxDuration: testMode ? 15 : 30,
       });
+
+      if (result?.uri) {
+        setSelectedVideo({
+          uri: result.uri,
+          name: `coaching-drill-${Date.now()}.mp4`,
+          mimeType: "video/mp4",
+        });
+        setRecordingStatus("Recorded coaching clip ready for analysis.");
+        setCameraOpen(false);
+        resetRunState();
+      } else {
+        setRecordingStatus("Recording ended before a clip was saved.");
+      }
     } catch (error) {
-      setFeedbackText(`Analysis failed: ${String(error.message || error)}`);
+      setErrorMessage(String(error.message || error));
+      setRecordingStatus("Recording failed. Try again.");
     } finally {
-      setIsAnalyzing(false);
+      setRecording(false);
     }
   }
 
-  if (!permission?.granted) {
-    return (
-      <View style={commonStyles.screenCentered}>
-        <Text style={commonStyles.title}>Camera Permission Needed</Text>
-        <Text style={commonStyles.subtitle}>Allow camera access so SureBall can run live analysis.</Text>
-        <PrimaryButton title="Allow Camera" onPress={requestPermission} />
-      </View>
-    );
+  function stopRecordingClip() {
+    if (!cameraRef.current || !recording) {
+      return;
+    }
+    cameraRef.current.stopRecording();
+    setRecordingStatus("Finishing clip...");
+  }
+
+  function closeCameraRecorder() {
+    if (recording && cameraRef.current) {
+      cameraRef.current.stopRecording();
+    }
+    setRecording(false);
+    setCameraOpen(false);
+    setRecordingStatus("Ready to record a coaching drill.");
+  }
+
+  async function handleStartAnalysis() {
+    if (!selectedVideo) {
+      return;
+    }
+
+    setStarting(true);
+    setStatus("starting");
+    setErrorMessage("");
+    setSummary("");
+    setClassification("");
+    setDominantFeedback([]);
+    setAverageScore(0);
+    setBestScore(0);
+    setWorstScore(0);
+    setAnalyzedFrames(0);
+    setProgress(0);
+
+    try {
+      const result = await startCoachingVideoAnalysis({
+        mode: mode.id,
+        videoAsset: selectedVideo,
+        overlayMode,
+        testMode,
+        userKey,
+      });
+      setJobId(result.file_id);
+      setStatus("processing");
+    } catch (error) {
+      setStatus("error");
+      setErrorMessage(String(error.message || error));
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function openResultVideo() {
+    if (!jobId) {
+      return;
+    }
+    await Linking.openURL(buildCoachingVideoDownloadUrl(jobId));
+  }
+
+  function resetRunState() {
+    setJobId(null);
+    setStatus("idle");
+    setProgress(0);
+    setAnalyzedFrames(0);
+    setAverageScore(0);
+    setBestScore(0);
+    setWorstScore(0);
+    setClassification("");
+    setSummary("");
+    setDominantFeedback([]);
+    setErrorMessage("");
   }
 
   return (
     <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
       <View style={commonStyles.heroCard}>
-        <Text style={commonStyles.eyebrow}>Live Drill</Text>
-        <Text style={[commonStyles.title, { marginTop: 10 }]}>{modeLabel}</Text>
+        <Text style={commonStyles.eyebrow}>Coaching Video</Text>
+        <Text style={[commonStyles.title, { marginTop: 10 }]}>{mode.title}</Text>
         <Text style={commonStyles.subtitle}>Player: {playerName}</Text>
         <Text style={[commonStyles.subtitle, { color: colors.text }]}>
-          Capture a frame to combine MediaPipe pose landmarks with YOLO ball tracking.
+          Upload a practice clip or record one live, then review the annotated coaching result directly in the app.
         </Text>
       </View>
 
-      <View style={[commonStyles.card, { padding: 0, overflow: "hidden" }]}>
-        <View
-          style={{
-            flexDirection: "row",
-            justifyContent: "space-between",
-            alignItems: "center",
-            paddingHorizontal: 18,
-            paddingVertical: 14,
-            borderBottomWidth: 1,
-            borderBottomColor: colors.border,
-            backgroundColor: colors.backgroundSoft,
-          }}
-        >
-          <View>
-            <Text style={commonStyles.label}>Analysis View</Text>
-            <Text style={[commonStyles.subtitle, { marginTop: 4 }]}>
-              {overlayReady
-                ? "Switch between the live camera and the latest tracked overlay."
-                : "Capture a frame to unlock the tracked overlay view."}
-            </Text>
-          </View>
-          <View style={{ flexDirection: "row", gap: 8 }}>
-            <TouchableOpacity
-              onPress={() => setPreviewMode("camera")}
-              style={[
-                commonStyles.pill,
-                previewMode === "camera" && { borderColor: colors.primary, backgroundColor: colors.cardElevated },
-              ]}
-            >
-              <Text style={commonStyles.pillText}>Live Camera</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              disabled={!overlayReady}
-              onPress={() => overlayReady && setPreviewMode("analysis")}
-              style={[
-                commonStyles.pill,
-                previewMode === "analysis" && overlayReady
-                  ? { borderColor: colors.secondary, backgroundColor: colors.cardElevated }
-                  : null,
-                !overlayReady && { opacity: 0.45 },
-              ]}
-            >
-              <Text style={commonStyles.pillText}>Last Overlay</Text>
-            </TouchableOpacity>
-          </View>
+      <View style={commonStyles.card}>
+        <Text style={commonStyles.label}>Clip Source</Text>
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+          <SourceButton
+            active={videoSource === "upload"}
+            title="Choose Video"
+            description="Pick a saved drill clip"
+            onPress={pickVideo}
+            disabled={status === "processing" || starting || recording}
+          />
+          <SourceButton
+            active={videoSource === "camera"}
+            title="Record Live"
+            description="Capture a new coaching rep"
+            onPress={openCameraRecorder}
+            disabled={status === "processing" || starting}
+          />
         </View>
+        <Text style={[commonStyles.subtitle, { marginTop: 14, color: colors.text }]}>Selected: {selectedVideoLabel}</Text>
+        <Text style={[commonStyles.subtitle, { fontSize: 12 }]}>
+          Tip: keep the full body in frame and avoid rapid camera movement for steadier pose feedback.
+        </Text>
+      </View>
 
-        <View style={{ height: 380, backgroundColor: "#040b15" }}>
-          {previewMode === "analysis" && overlayReady ? (
-            <Image source={{ uri: annotatedFrame }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+      {cameraOpen ? (
+        <View style={commonStyles.card}>
+          <Text style={commonStyles.label}>Live Camera Recorder</Text>
+          <Text style={commonStyles.subtitle}>{recordingStatus}</Text>
+          {cameraPermission?.granted ? (
+            <View style={{ marginTop: 14, overflow: "hidden", borderRadius: 18, borderWidth: 1, borderColor: colors.border }}>
+              <View style={{ height: 300, backgroundColor: "#040b15" }}>
+                <CameraView
+                  ref={cameraRef}
+                  style={{ flex: 1 }}
+                  mode="video"
+                  mute
+                  facing="back"
+                  videoQuality="720p"
+                />
+                <View
+                  style={{
+                    position: "absolute",
+                    top: 28,
+                    left: 20,
+                    right: 20,
+                    bottom: 28,
+                    borderWidth: 2,
+                    borderStyle: "dashed",
+                    borderColor: colors.success,
+                  }}
+                />
+                <Text
+                  style={{
+                    position: "absolute",
+                    top: 14,
+                    left: 14,
+                    color: colors.text,
+                    fontWeight: "800",
+                    letterSpacing: 0.8,
+                  }}
+                >
+                  COACHING FRAME
+                </Text>
+              </View>
+            </View>
           ) : (
-            <CameraView ref={cameraRef} style={{ flex: 1 }} facing="back" />
+            <PrimaryButton title="Allow Camera" onPress={requestCameraPermission} />
           )}
 
-          <View
-            style={{
-              position: "absolute",
-              top: 18,
-              left: 18,
-              right: 18,
-              flexDirection: "row",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-            }}
-          >
-            <View
-              style={{
-                paddingHorizontal: 12,
-                paddingVertical: 10,
-                borderRadius: 16,
-                backgroundColor: "rgba(7, 17, 31, 0.82)",
-                borderWidth: 1,
-                borderColor: previewMode === "analysis" ? colors.secondary : colors.primary,
-                maxWidth: "68%",
-              }}
-            >
-              <Text style={{ color: colors.muted, fontSize: 10, fontWeight: "800", letterSpacing: 1 }}>
-                {previewMode === "analysis" ? "TRACKED OVERLAY" : "LIVE CAMERA"}
-              </Text>
-              <Text style={{ color: colors.text, fontSize: 15, fontWeight: "800", marginTop: 4 }}>
-                {previewMode === "analysis" ? "YOLO Ball + MediaPipe Pose" : "Frame up the player and the ball"}
-              </Text>
+          <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+            <View style={{ flex: 1 }}>
+              <PrimaryButton
+                title={recording ? "Recording..." : "Start Recording"}
+                onPress={startRecordingClip}
+                disabled={!cameraPermission?.granted || recording}
+              />
             </View>
-
-            <View
-              style={{
-                paddingHorizontal: 10,
-                paddingVertical: 9,
-                borderRadius: 14,
-                backgroundColor: "rgba(7, 17, 31, 0.82)",
-                borderWidth: 1,
-                borderColor: colors.warning,
-              }}
-            >
-              <Text style={{ color: colors.muted, fontSize: 10, fontWeight: "800", letterSpacing: 1 }}>
-                RESULT
-              </Text>
-              <Text style={{ color: colors.text, fontSize: 13, fontWeight: "800", marginTop: 3 }}>
-                {classification}
-              </Text>
+            <View style={{ flex: 1 }}>
+              <PrimaryButton
+                title={recording ? "Stop Recording" : "Close Camera"}
+                onPress={recording ? stopRecordingClip : closeCameraRecorder}
+                disabled={starting || status === "processing"}
+              />
             </View>
           </View>
+        </View>
+      ) : null}
 
-          {previewMode === "camera" ? (
-            <View
+      <View style={commonStyles.card}>
+        <Text style={commonStyles.label}>Output Style</Text>
+        {OVERLAY_OPTIONS.map((option) => {
+          const active = option.id === overlayMode;
+          return (
+            <TouchableOpacity
+              key={option.id}
+              onPress={() => setOverlayMode(option.id)}
+              disabled={status === "processing" || starting}
               style={{
-                position: "absolute",
-                top: 52,
-                left: 28,
-                right: 28,
-                bottom: 28,
-                borderWidth: 2,
-                borderStyle: "dashed",
-                borderColor: colors.success,
+                marginTop: 12,
                 borderRadius: 18,
+                borderWidth: 1,
+                borderColor: active ? colors.primary : colors.border,
+                backgroundColor: active ? "rgba(255, 122, 26, 0.12)" : colors.backgroundSoft,
+                padding: 16,
               }}
-            />
-          ) : null}
-
-          <View
-            style={{
-              position: "absolute",
-              left: 18,
-              right: 18,
-              bottom: 18,
-              flexDirection: "row",
-              flexWrap: "wrap",
-              gap: 10,
-            }}
-          >
-            <TrackingBadge
-              label="POSE"
-              value={latestAnalysis?.pose_detected ? "Locked" : "Searching"}
-              tone={latestAnalysis?.pose_detected ? "success" : "warning"}
-            />
-            <TrackingBadge
-              label="BALL"
-              value={latestAnalysis?.ball_detected ? "Locked" : "Searching"}
-              tone={latestAnalysis?.ball_detected ? "success" : "warning"}
-            />
-            <TrackingBadge
-              label="LANDMARKS"
-              value={landmarkCount > 0 ? String(landmarkCount) : "0"}
-              tone={landmarkCount > 0 ? "success" : "warning"}
-            />
-            <TrackingBadge
-              label="BALL CONF"
-              value={ballConfidence !== null ? `${Math.round(ballConfidence * 100)}%` : "Waiting"}
-              tone={ballConfidence !== null ? "success" : "warning"}
-            />
-          </View>
-        </View>
-      </View>
-
-      <PrimaryButton
-        title={isAnalyzing ? "Analyzing..." : "Capture and Analyze Frame"}
-        onPress={captureAndAnalyzeFrame}
-        loading={isAnalyzing}
-      />
-
-      <View style={{ flexDirection: "row", gap: 12, marginTop: 14, marginBottom: 14 }}>
-        <View style={commonStyles.metricTile}>
-          <Text style={commonStyles.metricLabel}>Score</Text>
-          <Text style={commonStyles.metricValue}>{score}</Text>
-        </View>
-        <View style={commonStyles.metricTile}>
-          <Text style={commonStyles.metricLabel}>Ball Control</Text>
-          <Text style={commonStyles.metricValue}>{ballControl}</Text>
-        </View>
-      </View>
-
-      <View style={{ flexDirection: "row", gap: 12, marginBottom: 14 }}>
-        <View style={commonStyles.metricTile}>
-          <Text style={commonStyles.metricLabel}>Ball Zone</Text>
-          <Text style={commonStyles.metricValue}>{ballZone}</Text>
-        </View>
-        <View style={commonStyles.metricTile}>
-          <Text style={commonStyles.metricLabel}>Class</Text>
-          <Text style={[commonStyles.metricValue, { fontSize: 18 }]}>{classification}</Text>
-        </View>
+            >
+              <Text style={{ fontSize: 15, fontWeight: "700", color: colors.text }}>{option.title}</Text>
+              <Text style={{ marginTop: 4, color: colors.muted, fontSize: 13 }}>{option.description}</Text>
+            </TouchableOpacity>
+          );
+        })}
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>Selected: {selectedOverlay?.title}</Text>
       </View>
 
       <View style={commonStyles.card}>
-        <Text style={commonStyles.label}>Real-Time Feedback</Text>
-        <Text style={[commonStyles.subtitle, { marginTop: 8, color: colors.text }]}>{feedbackText}</Text>
-        {latestAnalysis?.coaching_summary ? (
-          <Text style={commonStyles.subtitle}>{latestAnalysis.coaching_summary}</Text>
-        ) : null}
-        {lastSessionId ? (
-          <Text style={{ marginTop: 10, color: colors.muted, fontSize: 12 }}>Session ID: {lastSessionId}</Text>
-        ) : null}
-      </View>
-
-      <View style={commonStyles.card}>
-        <Text style={commonStyles.label}>Detected Errors</Text>
-        {errors.length === 0 ? (
-          <Text style={commonStyles.subtitle}>No major errors detected in the latest frame.</Text>
-        ) : (
-          errors.map((item, idx) => (
-            <Text key={`${item.issue}-${idx}`} style={[commonStyles.subtitle, { color: colors.text }]}>
-              - {item.issue} ({item.severity}, -{item.deduction})
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <View style={{ flex: 1, paddingRight: 12 }}>
+            <Text style={commonStyles.label}>Test Mode</Text>
+            <Text style={commonStyles.subtitle}>
+              Limit processing to roughly the first 15 seconds so you can quickly validate framing and output quality.
             </Text>
-          ))
-        )}
+          </View>
+          <Switch
+            value={testMode}
+            onValueChange={setTestMode}
+            thumbColor="#ffffff"
+            trackColor={{ false: colors.border, true: colors.primary }}
+            disabled={status === "processing" || starting || recording}
+          />
+        </View>
+
+        <PrimaryButton
+          title={starting || status === "processing" ? "Analyzing..." : "Start Coaching Analysis"}
+          onPress={handleStartAnalysis}
+          loading={starting}
+          disabled={!selectedVideo || status === "processing" || recording}
+        />
       </View>
 
-      {isAnalyzing ? <ActivityIndicator style={{ marginBottom: 20 }} /> : null}
+      <View style={commonStyles.card}>
+        <Text style={commonStyles.label}>Live Results</Text>
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>
+          Status: {status === "idle" ? "Waiting to start" : status.replace(/_/g, " ")}
+        </Text>
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>Progress: {progress}%</Text>
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>Analyzed frames: {analyzedFrames}</Text>
 
-      <View style={{ marginBottom: 30 }} />
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+          <StatCard label="Average" value={averageScore.toFixed(1)} color={colors.secondary} />
+          <StatCard label="Best" value={bestScore || "--"} color={colors.success} />
+          <StatCard label="Worst" value={worstScore || "--"} color={colors.warning} />
+        </View>
+
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+          <StatCard label="Grade" value={classification || "--"} color={colors.primary} />
+          <StatCard label="Mode" value={mode.title} color={colors.accent} />
+        </View>
+
+        {dominantFeedback.length > 0 ? (
+          <View style={{ marginTop: 14 }}>
+            <Text style={commonStyles.label}>Top Focus Areas</Text>
+            {dominantFeedback.map((item, index) => (
+              <Text key={`${item}-${index}`} style={[commonStyles.subtitle, { color: colors.text }]}>
+                - {item}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+
+        {summary ? (
+          <Text style={[commonStyles.subtitle, { marginTop: 14, color: colors.text }]}>{summary}</Text>
+        ) : null}
+
+        {errorMessage ? (
+          <Text style={{ marginTop: 12, color: colors.danger, fontSize: 13 }}>{errorMessage}</Text>
+        ) : null}
+
+        {resultVideoUrl ? (
+          <>
+            <View
+              style={{
+                marginTop: 16,
+                overflow: "hidden",
+                borderRadius: 20,
+                borderWidth: 1,
+                borderColor: colors.border,
+                backgroundColor: "#040b15",
+              }}
+            >
+              <ResultVideoPlayer videoUrl={resultVideoUrl} />
+            </View>
+            <Text style={[commonStyles.subtitle, { marginTop: 10, fontSize: 12 }]}>
+              Review the annotated coaching output here, then download the file if you want to keep or share the clip.
+            </Text>
+            <PrimaryButton title="Download Video" onPress={openResultVideo} />
+          </>
+        ) : null}
+      </View>
     </ScrollView>
+  );
+}
+
+function ResultVideoPlayer({ videoUrl }) {
+  const player = useVideoPlayer(
+    {
+      uri: videoUrl,
+      useCaching: true,
+    },
+    (instance) => {
+      instance.loop = true;
+      instance.play();
+    }
+  );
+  const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
+
+  return (
+    <View>
+      <VideoView
+        style={{ width: "100%", height: 320, backgroundColor: "#040b15" }}
+        player={player}
+        nativeControls
+        allowsFullscreen
+        contentFit="contain"
+      />
+      <View style={{ padding: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onPress={() => {
+            if (isPlaying) {
+              player.pause();
+            } else {
+              player.play();
+            }
+          }}
+          style={{
+            borderRadius: 14,
+            borderWidth: 1,
+            borderColor: colors.primary,
+            backgroundColor: "rgba(255, 122, 26, 0.12)",
+            paddingVertical: 12,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text style={{ color: colors.primary, fontSize: 14, fontWeight: "800" }}>
+            {isPlaying ? "Pause Preview" : "Play Preview"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+function SourceButton({ active, title, description, onPress, disabled }) {
+  return (
+    <TouchableOpacity
+      activeOpacity={0.9}
+      onPress={onPress}
+      disabled={disabled}
+      style={{
+        flex: 1,
+        borderRadius: 18,
+        borderWidth: 1,
+        borderColor: active ? colors.primary : colors.border,
+        backgroundColor: active ? "rgba(255, 122, 26, 0.12)" : colors.backgroundSoft,
+        padding: 14,
+        opacity: disabled ? 0.65 : 1,
+      }}
+    >
+      <Text style={{ color: colors.text, fontSize: 15, fontWeight: "800" }}>{title}</Text>
+      <Text style={{ marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 }}>{description}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function StatCard({ label, value, color }) {
+  return (
+    <View
+      style={{
+        flex: 1,
+        minHeight: 92,
+        borderRadius: 18,
+        borderWidth: 1,
+        borderColor: colors.border,
+        backgroundColor: colors.cardElevated,
+        padding: 14,
+      }}
+    >
+      <Text style={{ fontSize: 11, color: colors.muted, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase" }}>
+        {label}
+      </Text>
+      <Text style={{ marginTop: 12, fontSize: 22, fontWeight: "800", color }}>{value}</Text>
+    </View>
   );
 }

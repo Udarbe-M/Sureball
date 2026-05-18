@@ -1,11 +1,13 @@
 import React, { useCallback, useState } from "react";
 import { Alert, RefreshControl, ScrollView, Text, TouchableOpacity, View } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
+import { useAuth } from "../context/AuthContext";
 import { deleteSessionFromBackend, fetchSessionsFromBackend } from "../services/api";
 import { deleteLocalSessionRecord, getLocalSessionHistory } from "../services/storage";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
 import { humanizeMode } from "../utils/helpers";
+import { buildUserKey } from "../utils/userKey";
 
 function mergeHistory(localSessions, backendSessions) {
   const normalizedLocal = localSessions.map((item) => ({
@@ -36,6 +38,8 @@ function mergeHistory(localSessions, backendSessions) {
 }
 
 export default function SessionHistoryScreen() {
+  const { playerEmail, playerName, userId } = useAuth();
+  const userKey = buildUserKey({ userId, playerName, playerEmail });
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState([]);
   const [deletingKey, setDeletingKey] = useState(null);
@@ -44,14 +48,14 @@ export default function SessionHistoryScreen() {
     setLoading(true);
     try {
       const [localSessions, backendSessions] = await Promise.all([
-        getLocalSessionHistory(),
-        fetchSessionsFromBackend(),
+        getLocalSessionHistory(userKey),
+        fetchSessionsFromBackend(userKey),
       ]);
       setHistory(mergeHistory(localSessions, backendSessions));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [userKey]);
 
   useFocusEffect(
     useCallback(() => {
@@ -78,9 +82,9 @@ export default function SessionHistoryScreen() {
     const recordKey = item.sourceKey || item.id || `${item.mode}-${item.timestamp}`;
     setDeletingKey(recordKey);
     try {
-      await deleteLocalSessionRecord(item.id, recordKey);
+      await deleteLocalSessionRecord(userKey, item.id, recordKey);
       if (item.id) {
-        await deleteSessionFromBackend(item.id);
+        await deleteSessionFromBackend(item.id, userKey);
       }
       await loadHistory();
     } catch (error) {

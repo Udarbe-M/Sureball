@@ -378,6 +378,7 @@ class ShotTrainingJob:
         output_path: Path,
         overlay_mode: str,
         test_mode: bool,
+        user_key: str,
     ) -> None:
         self.file_id = file_id
         self.detector = detector
@@ -385,6 +386,7 @@ class ShotTrainingJob:
         self.output_path = output_path
         self.overlay_mode = overlay_mode
         self.test_mode = test_mode
+        self.user_key = user_key
 
     def run(self) -> None:
         capture = cv2.VideoCapture(str(self.input_path))
@@ -498,6 +500,7 @@ class ShotTrainingJob:
                     "classification": classification,
                     "summary": summary,
                     "source_type": "shot_training_video",
+                    "user_key": self.user_key,
                 }
             )
 
@@ -545,6 +548,7 @@ def start_shot_training_job(
     video: UploadFile,
     overlay_mode: str,
     test_mode: bool,
+    user_key: str,
 ) -> dict[str, object]:
     ensure_shot_training_dirs()
 
@@ -569,6 +573,7 @@ def start_shot_training_job(
             "classification": None,
             "summary": None,
             "error_message": None,
+            "user_key": user_key,
         }
 
     worker = ShotTrainingJob(
@@ -578,6 +583,7 @@ def start_shot_training_job(
         output_path=output_path,
         overlay_mode=overlay_mode,
         test_mode=test_mode,
+        user_key=user_key,
     )
     thread = threading.Thread(target=worker.run, daemon=True)
     thread.start()

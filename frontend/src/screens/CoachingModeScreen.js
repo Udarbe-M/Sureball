@@ -24,16 +24,9 @@ const MODES = [
   },
 ];
 
-export default function CoachingModeScreen({ navigation, route }) {
-  const playerName = route.params?.playerName || "Student Athlete";
-  const playerEmail = route.params?.playerEmail || null;
-
+export default function CoachingModeScreen({ navigation }) {
   function openMode(mode) {
-    navigation.navigate("LiveAnalysis", {
-      mode,
-      playerName,
-      playerEmail,
-    });
+    navigation.navigate("LiveAnalysis", { mode });
   }
 
   return (
@@ -42,7 +35,7 @@ export default function CoachingModeScreen({ navigation, route }) {
         <Text style={commonStyles.eyebrow}>Training Deck</Text>
         <Text style={[commonStyles.title, { marginTop: 10 }]}>Choose Your Next Drill</Text>
         <Text style={commonStyles.subtitle}>
-          Build the session around the skill you want to sharpen right now, from shot mechanics to defensive posture.
+          Pick a drill, then upload or record a clip so SureBall can generate a playable coaching video with feedback.
         </Text>
       </View>
 

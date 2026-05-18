@@ -5,9 +5,16 @@ __pycache__/
 frontend/node_modules/
 frontend/.expo/
 frontend/expo-*.log
+frontend/expo*.log
 frontend/expo_app*.log
+frontend/expo*.err
+frontend/expo*.png
 backend/backend-dev*.log
+backend/backend*.err
+backend/backend*.log
 backend/data/debug_frames/
+backend/data/coaching_video_outputs/
+backend/data/coaching_video_uploads/
 backend/data/shot_training_outputs/
 backend/data/shot_training_uploads/
 
@@ -16,6 +23,7 @@ backend/test-frame.jpg
 backend/yolo11n.pt
 backend/data/datasets/
 backend/training/runs/
+backend/training/reports/
 backend/models/*.pt
 yolo11*.pt
 Basketball detection.v1i.yolov5pytorch.zip

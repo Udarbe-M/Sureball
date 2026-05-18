@@ -13,6 +13,11 @@ ModeName = Literal["shooting_form", "defensive_stance", "basic_footwork", "footw
 SeverityLevel = Literal["Minor", "Moderate", "Major"]
 Classification = Literal["Excellent", "Good", "Needs Improvement", "Poor"]
 
+EXCELLENT_SCORE_MIN = 85
+GOOD_SCORE_MIN = 72
+NEEDS_IMPROVEMENT_SCORE_MIN = 58
+DEDUCTION_SCALE = 0.7
+
 
 @dataclass
 class DetectedError:
@@ -43,11 +48,11 @@ class ScoringResult:
 
 
 def classify_score(score: float) -> Classification:
-    if score >= 90:
+    if score >= EXCELLENT_SCORE_MIN:
         return "Excellent"
-    if score >= 80:
+    if score >= GOOD_SCORE_MIN:
         return "Good"
-    if score >= 70:
+    if score >= NEEDS_IMPROVEMENT_SCORE_MIN:
         return "Needs Improvement"
     return "Poor"
 
@@ -68,7 +73,7 @@ def score_movement(
     else:
         detected_errors = _score_footwork(metrics)
 
-    total_deductions = sum(item.deduction for item in detected_errors)
+    total_deductions = sum(_scale_deduction(item.deduction) for item in detected_errors)
     final_score = max(0, start_score - total_deductions)
 
     return ScoringResult(
@@ -373,8 +378,20 @@ def _merge_metrics(features: Any, extra_metrics: Optional[Mapping[str, float]]) 
 
 def _extract_feedback_deduction(item: Any) -> int:
     if isinstance(item, Mapping):
-        return int(item.get("deduction", 0) or 0)
-    return int(getattr(item, "deduction", 0) or 0)
+        return _scale_deduction(item.get("deduction", 0) or 0)
+    return _scale_deduction(getattr(item, "deduction", 0) or 0)
+
+
+def _scale_deduction(raw_deduction: Any) -> int:
+    try:
+        deduction = int(raw_deduction or 0)
+    except (TypeError, ValueError):
+        return 0
+
+    if deduction <= 0:
+        return 0
+
+    return max(1, round(deduction * DEDUCTION_SCALE))
 
 
 def _normalize_mode(mode: str) -> str:

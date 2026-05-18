@@ -1,15 +1,17 @@
 import React, { useEffect, useState } from "react";
 import { ScrollView, Text, TouchableOpacity, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
+import { useAuth } from "../context/AuthContext";
 import { healthCheck } from "../services/api";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
+import { getDailyTip } from "../utils/tips";
 
-export default function DashboardScreen({ navigation, route }) {
-  const playerName = route.params?.playerName || "Student Athlete";
-  const playerEmail = route.params?.playerEmail || null;
-  const userPersisted = route.params?.userPersisted;
+export default function DashboardScreen({ navigation }) {
+  const { isGuest, playerEmail, playerName, profile } = useAuth();
+  const userPersisted = Boolean(profile?.id) && !isGuest;
   const [backendStatus, setBackendStatus] = useState("Checking...");
+  const dailyTip = useState(() => getDailyTip())[0];
 
   useEffect(() => {
     let mounted = true;
@@ -47,19 +49,41 @@ export default function DashboardScreen({ navigation, route }) {
             color={backendStatus === "Connected" ? colors.success : colors.danger}
           />
           <StatusPill
-            label={userPersisted ? "Supabase Synced" : "Local Profile"}
-            color={userPersisted ? colors.secondary : colors.warning}
+            label={isGuest ? "Guest Profile" : userPersisted ? "Supabase Profile" : "Profile Pending"}
+            color={isGuest ? colors.accent : userPersisted ? colors.secondary : colors.warning}
           />
         </View>
 
         {playerEmail ? (
           <Text style={[commonStyles.subtitle, { marginTop: 16, color: colors.text }]}>Athlete email: {playerEmail}</Text>
         ) : null}
+        {isGuest ? (
+          <Text style={[commonStyles.subtitle, { marginTop: 16, color: colors.text }]}>
+            Guest mode is stored locally for quick testing on this device.
+          </Text>
+        ) : null}
       </View>
 
       <View style={{ flexDirection: "row", gap: 12, marginBottom: 14 }}>
         <MetricTile label="System" value={backendStatus === "Connected" ? "READY" : "CHECK"} color={colors.secondary} />
-        <MetricTile label="Profile" value={userPersisted ? "SYNCED" : "LOCAL"} color={colors.primary} />
+        <MetricTile label="Profile" value={isGuest ? "GUEST" : userPersisted ? "SYNCED" : "CHECK"} color={colors.primary} />
+      </View>
+
+      <View style={[commonStyles.card, { overflow: "hidden" }]}>
+        <View
+          style={{
+            position: "absolute",
+            right: -22,
+            top: -22,
+            width: 92,
+            height: 92,
+            borderRadius: 46,
+            backgroundColor: "rgba(110, 203, 255, 0.12)",
+          }}
+        />
+        <Text style={commonStyles.eyebrow}>Tip Of The Day</Text>
+        <Text style={[commonStyles.sectionTitle, { marginTop: 10 }]}>{dailyTip.title}</Text>
+        <Text style={commonStyles.subtitle}>{dailyTip.body}</Text>
       </View>
 
       <ActionCard
@@ -67,7 +91,9 @@ export default function DashboardScreen({ navigation, route }) {
         title="Start Coaching Session"
         description="Choose a mode and open the camera flow for real-time basketball feedback."
         accentColor={colors.primary}
-        action={<PrimaryButton title="Choose Mode" onPress={() => navigation.navigate("CoachingModes", { playerName, playerEmail })} />}
+        action={
+          <PrimaryButton title="Choose Mode" onPress={() => navigation.navigate("CoachingModes")} />
+        }
       />
 
       <ActionCard
@@ -75,10 +101,24 @@ export default function DashboardScreen({ navigation, route }) {
         title="Train Shooting With Video"
         description="Upload a shooting clip to break down attempts, makes, misses, and overall percentage."
         accentColor={colors.secondary}
-        action={<PrimaryButton title="Open Shooting Training" onPress={() => navigation.navigate("ShootingTraining")} />}
+        action={
+          <PrimaryButton title="Open Shooting Training" onPress={() => navigation.navigate("ShootingTraining")} />
+        }
       />
 
-      <TouchableOpacity activeOpacity={0.9} onPress={() => navigation.navigate("SessionHistory")} style={commonStyles.card}>
+      <ActionCard
+        eyebrow="Player Menu"
+        title="Edit Player Name"
+        description="Open your player menu to change your player name, update your password, or sign out."
+        accentColor={colors.accent}
+        action={<PrimaryButton title="Open Menu" onPress={() => navigation.navigate("PlayerMenu")} />}
+      />
+
+      <TouchableOpacity
+        activeOpacity={0.9}
+        onPress={() => navigation.navigate("SessionHistory")}
+        style={commonStyles.card}
+      >
         <Text style={commonStyles.eyebrow}>Film Room</Text>
         <Text style={[commonStyles.sectionTitle, { marginTop: 10 }]}>Review Previous Sessions</Text>
         <Text style={commonStyles.subtitle}>See prior scores, classifications, and summaries from live and video runs.</Text>

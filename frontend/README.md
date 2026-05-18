@@ -7,13 +7,13 @@ Simple thesis-prototype mobile frontend for SureBall.
 1. Login Screen
 2. Dashboard Screen
 3. Coaching Mode Selection Screen
-4. Live Camera Analysis Screen
+4. Coaching Video Analysis Screen
 5. Session History Screen
 
 ## Features
 
 - Camera capture via `expo-camera`
-- Frame upload to FastAPI `/analyze-frame` using `fetch`
+- Coaching video upload/record flow with in-app preview and download
 - Real-time feedback text + score display
 - Skeletal overlay and basketball box placeholders on live view
 - Local session history via AsyncStorage
@@ -53,7 +53,7 @@ EXPO_PUBLIC_BACKEND_URL=http://<your-lan-ip>:8000 npm run start -- --lan
 
 ## Notes
 
-- Live screen currently sends one captured frame per tap ("Capture and Analyze Frame").
+- Coaching mode now supports uploaded or in-app recorded videos and returns an annotated downloadable result clip.
 - Video upload endpoint exists in service file (`analyzeVideo`) for future extension.
 - UI is intentionally simple for thesis-prototype iteration.
 
@@ -64,20 +64,31 @@ Set values in `frontend/app.json`:
 ```json
 "extra": {
   "supabaseUrl": "https://YOUR-PROJECT-REF.supabase.co",
-  "supabasePublishableKey": "YOUR_SUPABASE_PUBLISHABLE_KEY"
+  "supabasePublishableKey": "YOUR_SUPABASE_PUBLISHABLE_KEY",
+  "supabaseEmailRedirectTo": "https://YOUR-APP-URL-OR-CONFIRMATION-PAGE"
 }
 ```
 
-Create table in Supabase:
+The old prototype `users` table is no longer required for login. The app now uses Supabase Auth plus a `profiles` table linked to `auth.users`.
 
-```sql
-create table if not exists public.users (
-  id uuid primary key default gen_random_uuid(),
-  name text not null unique,
-  email text,
-  last_login_at timestamptz,
-  created_at timestamptz not null default now()
-);
+## Supabase Auth + Profiles Setup
+
+The app now uses Supabase email/password auth together with a `profiles` table keyed by `auth.users.id`.
+
+1. Open the Supabase SQL Editor for your project.
+2. Run the migration in [supabase/migrations/20260518_auth_profiles.sql](/C:/Users/Administrator/Documents/Sureball/supabase/migrations/20260518_auth_profiles.sql).
+3. In the Supabase dashboard, confirm Email auth is enabled under Authentication > Providers.
+4. Keep the publishable key and project URL in `frontend/app.json`, or provide them with:
+
+```bash
+EXPO_PUBLIC_SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co
+EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=YOUR_SUPABASE_PUBLISHABLE_KEY
+EXPO_PUBLIC_SUPABASE_EMAIL_REDIRECT_TO=https://YOUR-APP-URL-OR-CONFIRMATION-PAGE
 ```
 
-The login screen performs an upsert on `users` by `name`. If Supabase keys are not configured, the app falls back to local-only behavior.
+Notes:
+
+- Hosted Supabase projects usually require email confirmation by default, so a new player may need to verify the signup email before logging in.
+- The Register screen also supports a local `Guest User` path for testing without email or password. Guest profiles stay on the current device only.
+- Player names now live in `public.profiles.player_name` and can be changed from the in-app Player Menu after login.
+- A ready-to-paste SureBall signup verification email template lives in [supabase/email-templates](/C:/Users/Administrator/Documents/Sureball/supabase/email-templates/README.md).
