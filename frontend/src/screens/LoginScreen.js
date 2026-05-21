@@ -13,9 +13,11 @@ export default function LoginScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
+  const [resendingVerification, setResendingVerification] = useState(false);
+  const [pendingVerificationEmail, setPendingVerificationEmail] = useState("");
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState("neutral");
-  const { clearError, signIn, signUp } = useAuth();
+  const { clearError, resendVerificationEmail, signIn, signUp } = useAuth();
 
   async function handleSubmit() {
     const normalizedEmail = String(email || "").trim().toLowerCase();
@@ -32,6 +34,7 @@ export default function LoginScreen() {
     if (isGuestRegistration) {
       setSaving(true);
       setMessage("");
+      setPendingVerificationEmail("");
       clearError();
 
       try {
@@ -62,6 +65,7 @@ export default function LoginScreen() {
 
     setSaving(true);
     setMessage("");
+    setPendingVerificationEmail("");
     clearError();
 
     try {
@@ -73,8 +77,11 @@ export default function LoginScreen() {
         });
 
         if (result.needsEmailVerification) {
+          setPendingVerificationEmail(normalizedEmail);
           setMessageTone("success");
-          setMessage("Check your email to confirm the account, then return here to sign in.");
+          setMessage(
+            "Check your email to confirm the account, then return here to sign in. If nothing arrives, the Supabase project likely still needs custom SMTP or a team-authorized test address."
+          );
         }
       } else {
         await signIn({
@@ -87,6 +94,33 @@ export default function LoginScreen() {
       setMessage(String(error.message || error));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleResendVerification() {
+    const normalizedEmail = String(pendingVerificationEmail || email || "").trim().toLowerCase();
+    if (!normalizedEmail) {
+      setMessageTone("error");
+      setMessage("Enter the email address that should receive the verification email first.");
+      return;
+    }
+
+    setResendingVerification(true);
+    setMessage("");
+    clearError();
+
+    try {
+      await resendVerificationEmail(normalizedEmail);
+      setPendingVerificationEmail(normalizedEmail);
+      setMessageTone("success");
+      setMessage(
+        "A new verification email was requested. If it still does not arrive, check Supabase SMTP setup, team-email restrictions, and spam folders."
+      );
+    } catch (error) {
+      setMessageTone("error");
+      setMessage(String(error.message || error));
+    } finally {
+      setResendingVerification(false);
     }
   }
 
@@ -150,6 +184,7 @@ export default function LoginScreen() {
             onPress={() => {
               setAuthMode("login");
               setMessage("");
+              setPendingVerificationEmail("");
             }}
           />
           <ModeToggle
@@ -178,6 +213,7 @@ export default function LoginScreen() {
               onPress={() => {
                 setRegisterMode("guest");
                 setMessage("");
+                setPendingVerificationEmail("");
               }}
             />
           </View>
@@ -248,6 +284,28 @@ export default function LoginScreen() {
           >
             {message}
           </Text>
+        ) : null}
+
+        {pendingVerificationEmail && authMode === "register" && registerMode === "account" ? (
+          <TouchableOpacity
+            activeOpacity={0.85}
+            disabled={resendingVerification || saving}
+            onPress={handleResendVerification}
+            style={{
+              marginTop: 12,
+              paddingVertical: 10,
+              alignItems: "center",
+              borderRadius: 14,
+              borderWidth: 1,
+              borderColor: colors.border,
+              backgroundColor: colors.backgroundSoft,
+              opacity: resendingVerification || saving ? 0.7 : 1,
+            }}
+          >
+            <Text style={{ color: colors.secondary, fontWeight: "800", letterSpacing: 0.5 }}>
+              {resendingVerification ? "Sending Verification Email..." : "Resend Verification Email"}
+            </Text>
+          </TouchableOpacity>
         ) : null}
 
         <PrimaryButton

@@ -525,10 +525,10 @@ function StatCard({ label, value, color }) {
         padding: 14,
       }}
     >
-      <Text style={{ fontSize: 11, color: colors.muted, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase" }}>
+      <Text style={{ fontSize: 10, color: colors.muted, fontWeight: "800", letterSpacing: 0.8, textTransform: "uppercase" }}>
         {label}
       </Text>
-      <Text style={{ marginTop: 12, fontSize: 22, fontWeight: "800", color }}>{value}</Text>
+      <Text style={{ marginTop: 10, fontSize: 20, fontWeight: "800", color }}>{value}</Text>
     </View>
   );
 }

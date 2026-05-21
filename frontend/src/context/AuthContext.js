@@ -6,6 +6,7 @@ import {
   getCurrentSession,
   isSupabaseReady,
   normalizePlayerName,
+  resendSignupVerification,
   signInWithEmail,
   signOutUser,
   signUpWithEmail,
@@ -244,6 +245,10 @@ export function AuthProvider({ children }) {
         }
 
         return result;
+      },
+      async resendVerificationEmail(email) {
+        setError("");
+        return resendSignupVerification(email);
       },
       async signOut() {
         setError("");

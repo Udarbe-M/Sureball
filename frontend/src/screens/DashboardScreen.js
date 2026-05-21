@@ -1,27 +1,14 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { ScrollView, Text, TouchableOpacity, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
-import { healthCheck } from "../services/api";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
 import { getDailyTip } from "../utils/tips";
 
 export default function DashboardScreen({ navigation }) {
-  const { isGuest, playerEmail, playerName, profile } = useAuth();
-  const userPersisted = Boolean(profile?.id) && !isGuest;
-  const [backendStatus, setBackendStatus] = useState("Checking...");
+  const { playerName } = useAuth();
   const dailyTip = useState(() => getDailyTip())[0];
-
-  useEffect(() => {
-    let mounted = true;
-    healthCheck()
-      .then(() => mounted && setBackendStatus("Connected"))
-      .catch(() => mounted && setBackendStatus("Offline"));
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   return (
     <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
@@ -42,31 +29,6 @@ export default function DashboardScreen({ navigation }) {
         <Text style={commonStyles.subtitle}>
           Load a live drill, review session data, or run a shooting breakdown from one courtside control panel.
         </Text>
-
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 18 }}>
-          <StatusPill
-            label={`Backend ${backendStatus}`}
-            color={backendStatus === "Connected" ? colors.success : colors.danger}
-          />
-          <StatusPill
-            label={isGuest ? "Guest Profile" : userPersisted ? "Supabase Profile" : "Profile Pending"}
-            color={isGuest ? colors.accent : userPersisted ? colors.secondary : colors.warning}
-          />
-        </View>
-
-        {playerEmail ? (
-          <Text style={[commonStyles.subtitle, { marginTop: 16, color: colors.text }]}>Athlete email: {playerEmail}</Text>
-        ) : null}
-        {isGuest ? (
-          <Text style={[commonStyles.subtitle, { marginTop: 16, color: colors.text }]}>
-            Guest mode is stored locally for quick testing on this device.
-          </Text>
-        ) : null}
-      </View>
-
-      <View style={{ flexDirection: "row", gap: 12, marginBottom: 14 }}>
-        <MetricTile label="System" value={backendStatus === "Connected" ? "READY" : "CHECK"} color={colors.secondary} />
-        <MetricTile label="Profile" value={isGuest ? "GUEST" : userPersisted ? "SYNCED" : "CHECK"} color={colors.primary} />
       </View>
 
       <View style={[commonStyles.card, { overflow: "hidden" }]}>
@@ -106,14 +68,6 @@ export default function DashboardScreen({ navigation }) {
         }
       />
 
-      <ActionCard
-        eyebrow="Player Menu"
-        title="Edit Player Name"
-        description="Open your player menu to change your player name, update your password, or sign out."
-        accentColor={colors.accent}
-        action={<PrimaryButton title="Open Menu" onPress={() => navigation.navigate("PlayerMenu")} />}
-      />
-
       <TouchableOpacity
         activeOpacity={0.9}
         onPress={() => navigation.navigate("SessionHistory")}
@@ -125,31 +79,6 @@ export default function DashboardScreen({ navigation }) {
         <Text style={{ marginTop: 16, color: colors.accent, fontWeight: "800", letterSpacing: 0.8 }}>OPEN SESSION HISTORY</Text>
       </TouchableOpacity>
     </ScrollView>
-  );
-}
-
-function StatusPill({ label, color }) {
-  return (
-    <View
-      style={[
-        commonStyles.pill,
-        {
-          backgroundColor: "rgba(7, 17, 31, 0.28)",
-          borderColor: color,
-        },
-      ]}
-    >
-      <Text style={[commonStyles.pillText, { color }]}>{label}</Text>
-    </View>
-  );
-}
-
-function MetricTile({ label, value, color }) {
-  return (
-    <View style={commonStyles.metricTile}>
-      <Text style={commonStyles.metricLabel}>{label}</Text>
-      <Text style={[commonStyles.metricValue, { color }]}>{value}</Text>
-    </View>
   );
 }
 

@@ -57,6 +57,46 @@ EXPO_PUBLIC_BACKEND_URL=http://<your-lan-ip>:8000 npm run start -- --lan
 - Video upload endpoint exists in service file (`analyzeVideo`) for future extension.
 - UI is intentionally simple for thesis-prototype iteration.
 
+## Free Local Backend with zrok
+
+If you want to keep the backend on your own PC and avoid paying for hosting, you can expose the local FastAPI server with `zrok` and build the APK against that public HTTPS URL.
+
+### One-time reserve
+
+From the repo root:
+
+```bash
+powershell -ExecutionPolicy Bypass -File .\scripts\reserve-sureball-zrok.ps1 -UniqueName sureballapi
+```
+
+This creates a stable reserved token such as `sureballapi`.
+
+### Start backend + zrok share
+
+From the repo root:
+
+```bash
+powershell -ExecutionPolicy Bypass -File .\scripts\start-sureball-backend-zrok.ps1 -ShareToken sureballapi
+```
+
+Keep that terminal window open while testing the mobile app.
+
+### Build an installable APK
+
+From `frontend/`:
+
+```bash
+npm run build:apk
+```
+
+Or from the repo root with an explicit backend URL:
+
+```bash
+powershell -ExecutionPolicy Bypass -File .\scripts\build-sureball-apk.ps1 -BackendUrl https://sureballapi.share.zrok.io
+```
+
+The `preview` EAS profile in [eas.json](/C:/Users/W-11-VM/Desktop/Sureball/frontend/eas.json) is configured to output an installable `.apk`.
+
 ## Supabase Setup (User Information)
 
 Set values in `frontend/app.json`:
@@ -89,6 +129,7 @@ EXPO_PUBLIC_SUPABASE_EMAIL_REDIRECT_TO=https://YOUR-APP-URL-OR-CONFIRMATION-PAGE
 Notes:
 
 - Hosted Supabase projects usually require email confirmation by default, so a new player may need to verify the signup email before logging in.
+- As of September 26, 2024, Supabase's built-in email sender only delivers auth emails to addresses that belong to the project's organization team, and it is heavily rate-limited. If outside users are not receiving verification emails, configure `Authentication > SMTP Settings` with a custom provider before testing the APK with real user emails.
 - The Register screen also supports a local `Guest User` path for testing without email or password. Guest profiles stay on the current device only.
 - Player names now live in `public.profiles.player_name` and can be changed from the in-app Player Menu after login.
 - A ready-to-paste SureBall signup verification email template lives in [supabase/email-templates](/C:/Users/Administrator/Documents/Sureball/supabase/email-templates/README.md).
