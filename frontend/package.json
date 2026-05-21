@@ -5,9 +5,12 @@
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
+    "start:lan": "expo start --lan --port 8081",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "build:apk": "npx eas-cli@latest build -p android --profile preview",
+    "build:aab": "npx eas-cli@latest build -p android --profile production"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
@@ -17,6 +20,7 @@
     "expo": "~54.0.34",
     "expo-camera": "~17.0.10",
     "expo-document-picker": "~14.0.8",
+    "expo-file-system": "~19.0.22",
     "expo-status-bar": "~3.0.9",
     "expo-video": "~3.0.16",
     "react": "^19.1.0",
