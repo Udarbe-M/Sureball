@@ -7,6 +7,7 @@ import { Linking, ScrollView, Switch, Text, TouchableOpacity, View } from "react
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
 import { buildShootingTrainingDownloadUrl, fetchShootingTrainingStatus, startShootingTraining } from "../services/api";
+import { saveAnnotatedVideoLocally, saveSessionRecord } from "../services/storage";
 import { commonStyles } from "../theme/styles";
 import { colors } from "../theme/colors";
 import { buildUserKey } from "../utils/userKey";
@@ -44,6 +45,8 @@ export default function ShootingTrainingScreen() {
   const [summary, setSummary] = useState("");
   const [classification, setClassification] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [archiveMessage, setArchiveMessage] = useState("");
+  const [archiveMessageTone, setArchiveMessageTone] = useState("neutral");
   const [starting, setStarting] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -69,7 +72,42 @@ export default function ShootingTrainingScreen() {
         setClassification(result.classification || "");
 
         if (result.status === "completed") {
+          const archivedAt = new Date().toISOString();
+          const remoteVideoUrl = buildShootingTrainingDownloadUrl(jobId);
+          let localVideoUri = "";
+
+          try {
+            localVideoUri = await saveAnnotatedVideoLocally({
+              remoteUrl: remoteVideoUrl,
+              sessionId: jobId,
+              mode: "shooting_training",
+              timestamp: archivedAt,
+              suffix: "shot-lab",
+            });
+            setArchiveMessageTone("success");
+            setArchiveMessage("Annotated video saved on this phone for offline playback in Session History.");
+          } catch (downloadError) {
+            setArchiveMessageTone("warning");
+            setArchiveMessage(
+              `Training finished, but the offline video copy could not be saved: ${String(downloadError.message || downloadError)}`
+            );
+          }
+
           setStatus("completed");
+          await saveSessionRecord(userKey, {
+            id: jobId,
+            userKey,
+            playerName,
+            playerEmail,
+            mode: "shooting_training",
+            modeLabel: "Shooting Training",
+            score: Number(result.stats?.accuracy || 0),
+            classification: result.classification || "Needs Improvement",
+            detectedErrors: [],
+            timestamp: archivedAt,
+            summary: result.summary || "",
+            localVideoUri: localVideoUri || null,
+          });
         } else if (result.status === "error") {
           setStatus("error");
           setErrorMessage(result.error_message || "Shot training failed.");
@@ -81,7 +119,7 @@ export default function ShootingTrainingScreen() {
     }, 1500);
 
     return () => clearInterval(timer);
-  }, [jobId, status]);
+  }, [jobId, playerEmail, playerName, status, userKey]);
 
   useEffect(() => {
     return () => {
@@ -198,6 +236,8 @@ export default function ShootingTrainingScreen() {
     setStarting(true);
     setStatus("starting");
     setErrorMessage("");
+    setArchiveMessage("");
+    setArchiveMessageTone("neutral");
     setSummary("");
     setClassification("");
     setStats(INITIAL_STATS);
@@ -235,6 +275,8 @@ export default function ShootingTrainingScreen() {
     setSummary("");
     setClassification("");
     setErrorMessage("");
+    setArchiveMessage("");
+    setArchiveMessageTone("neutral");
   }
 
   return (
@@ -414,6 +456,18 @@ export default function ShootingTrainingScreen() {
           <Text style={{ marginTop: 12, color: colors.danger, fontSize: 13 }}>{errorMessage}</Text>
         ) : null}
 
+        {archiveMessage ? (
+          <Text
+            style={{
+              marginTop: 12,
+              color: archiveMessageTone === "success" ? colors.success : colors.warning,
+              fontSize: 13,
+            }}
+          >
+            {archiveMessage}
+          </Text>
+        ) : null}
+
         {resultVideoUrl ? (
           <>
             <View
@@ -525,10 +579,10 @@ function StatCard({ label, value, color }) {
         padding: 14,
       }}
     >
-      <Text style={{ fontSize: 11, color: colors.muted, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase" }}>
+      <Text style={{ fontSize: 9, color: colors.muted, fontWeight: "800", letterSpacing: 0.6, textTransform: "uppercase" }}>
         {label}
       </Text>
-      <Text style={{ marginTop: 12, fontSize: 22, fontWeight: "800", color }}>{value}</Text>
+      <Text style={{ marginTop: 8, fontSize: 18, fontWeight: "800", color }}>{value}</Text>
     </View>
   );
 }

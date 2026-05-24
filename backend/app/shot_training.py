@@ -281,6 +281,7 @@ class ShotTrainingTracker:
         self.banner_until_frame = -1
         self.pending_shot_streak = 0
         self.active_attempt_frame: Optional[int] = None
+        self.awaiting_shot_reset = False
         self.shot_cooldown_frames = max(1, int(self.fps * SHOT_COOLDOWN_SECONDS))
         self.make_cooldown_frames = max(1, int(self.fps * MAKE_COOLDOWN_SECONDS))
         self.banner_duration_frames = max(10, int(self.fps * MAKE_BANNER_SECONDS))
@@ -313,10 +314,14 @@ class ShotTrainingTracker:
 
         shot_detection = _best_detection(detections, "player_shooting")
         if shot_detection:
-            self.pending_shot_streak += 1
             self.last_shot_signal_frame = frame_index
+            if self.awaiting_shot_reset:
+                self.pending_shot_streak = 0
+            else:
+                self.pending_shot_streak += 1
         else:
             self.pending_shot_streak = 0
+            self.awaiting_shot_reset = False
 
         if (
             self.active_attempt_frame is None
@@ -357,6 +362,7 @@ class ShotTrainingTracker:
         self.attempts += 1
         self.last_attempt_frame = frame_index
         self.active_attempt_frame = frame_index
+        self.awaiting_shot_reset = True
         self._set_banner(banner_text, frame_index)
 
     def _resolve_attempt(self, frame_index: int, made: bool, banner_text: str) -> None:

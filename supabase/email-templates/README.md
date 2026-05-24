@@ -33,3 +33,7 @@ If you want verification emails to send users to a specific URL after confirmati
 - `expo.extra.supabaseEmailRedirectTo` in `frontend/app.json`
 
 Make sure the same URL is added to your Supabase Auth redirect allow list.
+
+## Delivery note
+
+Supabase's default email provider is only meant for limited testing. For non-team users in the APK, configure `Authentication > SMTP Settings` with a custom provider, otherwise confirmation emails may never be delivered.

@@ -11,7 +11,7 @@ import {
   fetchCoachingVideoStatus,
   startCoachingVideoAnalysis,
 } from "../services/api";
-import { saveSessionRecord } from "../services/storage";
+import { saveAnnotatedVideoLocally, saveSessionRecord } from "../services/storage";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
 import { buildUserKey } from "../utils/userKey";
@@ -52,6 +52,8 @@ export default function LiveAnalysisScreen({ route }) {
   const [summary, setSummary] = useState("");
   const [dominantFeedback, setDominantFeedback] = useState([]);
   const [errorMessage, setErrorMessage] = useState("");
+  const [archiveMessage, setArchiveMessage] = useState("");
+  const [archiveMessageTone, setArchiveMessageTone] = useState("neutral");
   const [starting, setStarting] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -81,6 +83,27 @@ export default function LiveAnalysisScreen({ route }) {
         setDominantFeedback(result.dominant_feedback || []);
 
         if (result.status === "completed") {
+          const archivedAt = new Date().toISOString();
+          const remoteVideoUrl = buildCoachingVideoDownloadUrl(result.file_id);
+          let localVideoUri = "";
+
+          try {
+            localVideoUri = await saveAnnotatedVideoLocally({
+              remoteUrl: remoteVideoUrl,
+              sessionId: result.file_id,
+              mode: mode.id,
+              timestamp: archivedAt,
+              suffix: "coaching",
+            });
+            setArchiveMessageTone("success");
+            setArchiveMessage("Annotated video saved on this phone for offline playback in Session History.");
+          } catch (downloadError) {
+            setArchiveMessageTone("warning");
+            setArchiveMessage(
+              `Analysis finished, but the offline video copy could not be saved: ${String(downloadError.message || downloadError)}`
+            );
+          }
+
           setStatus("completed");
           await saveSessionRecord(userKey, {
             id: result.file_id,
@@ -95,8 +118,9 @@ export default function LiveAnalysisScreen({ route }) {
               issue: message,
               severity: "Moderate",
             })),
-            timestamp: new Date().toISOString(),
+            timestamp: archivedAt,
             summary: result.summary || "",
+            localVideoUri: localVideoUri || null,
           });
         } else if (result.status === "error") {
           setStatus("error");
@@ -225,6 +249,8 @@ export default function LiveAnalysisScreen({ route }) {
     setStarting(true);
     setStatus("starting");
     setErrorMessage("");
+    setArchiveMessage("");
+    setArchiveMessageTone("neutral");
     setSummary("");
     setClassification("");
     setDominantFeedback([]);
@@ -271,6 +297,8 @@ export default function LiveAnalysisScreen({ route }) {
     setSummary("");
     setDominantFeedback([]);
     setErrorMessage("");
+    setArchiveMessage("");
+    setArchiveMessageTone("neutral");
   }
 
   return (
@@ -461,6 +489,18 @@ export default function LiveAnalysisScreen({ route }) {
           <Text style={{ marginTop: 12, color: colors.danger, fontSize: 13 }}>{errorMessage}</Text>
         ) : null}
 
+        {archiveMessage ? (
+          <Text
+            style={{
+              marginTop: 12,
+              color: archiveMessageTone === "success" ? colors.success : colors.warning,
+              fontSize: 13,
+            }}
+          >
+            {archiveMessage}
+          </Text>
+        ) : null}
+
         {resultVideoUrl ? (
           <>
             <View
@@ -572,10 +612,10 @@ function StatCard({ label, value, color }) {
         padding: 14,
       }}
     >
-      <Text style={{ fontSize: 11, color: colors.muted, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase" }}>
+      <Text style={{ fontSize: 9, color: colors.muted, fontWeight: "800", letterSpacing: 0.6, textTransform: "uppercase" }}>
         {label}
       </Text>
-      <Text style={{ marginTop: 12, fontSize: 22, fontWeight: "800", color }}>{value}</Text>
+      <Text style={{ marginTop: 8, fontSize: 18, fontWeight: "800", color }}>{value}</Text>
     </View>
   );
 }

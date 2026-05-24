@@ -1,3 +1,5 @@
+import { useEvent } from "expo";
+import { VideoView, useVideoPlayer } from "expo-video";
 import React, { useCallback, useState } from "react";
 import { Alert, RefreshControl, ScrollView, Text, TouchableOpacity, View } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
@@ -43,6 +45,7 @@ export default function SessionHistoryScreen() {
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState([]);
   const [deletingKey, setDeletingKey] = useState(null);
+  const [previewKey, setPreviewKey] = useState(null);
 
   const loadHistory = useCallback(async () => {
     setLoading(true);
@@ -81,6 +84,7 @@ export default function SessionHistoryScreen() {
   async function handleDelete(item) {
     const recordKey = item.sourceKey || item.id || `${item.mode}-${item.timestamp}`;
     setDeletingKey(recordKey);
+    setPreviewKey((current) => (current === recordKey ? null : current));
     try {
       await deleteLocalSessionRecord(userKey, item.id, recordKey);
       if (item.id) {
@@ -131,6 +135,7 @@ export default function SessionHistoryScreen() {
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
               <InfoPill label={item.classification || "Pending"} color={classificationColor(item.classification)} />
               <InfoPill label={new Date(item.timestamp).toLocaleString()} color={colors.secondary} />
+              {item.localVideoUri ? <InfoPill label="Offline Video Saved" color={colors.success} /> : null}
             </View>
 
             {item.summary ? (
@@ -138,26 +143,58 @@ export default function SessionHistoryScreen() {
             ) : null}
 
             <View style={commonStyles.divider} />
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
               <Text style={commonStyles.label}>Detected Errors</Text>
-              <TouchableOpacity
-                activeOpacity={0.85}
-                disabled={deletingKey === item.sourceKey}
-                onPress={() => confirmDelete(item)}
-                style={{
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  borderColor: colors.danger,
-                  backgroundColor: "rgba(255, 123, 123, 0.12)",
-                  opacity: deletingKey === item.sourceKey ? 0.65 : 1,
-                }}
-              >
-                <Text style={{ color: colors.danger, fontSize: 12, fontWeight: "800", letterSpacing: 0.8 }}>
-                  {deletingKey === item.sourceKey ? "DELETING..." : "DELETE"}
-                </Text>
-              </TouchableOpacity>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", gap: 8, flex: 1 }}>
+                {item.localVideoUri ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    disabled={deletingKey === item.sourceKey}
+                    onPress={() =>
+                      setPreviewKey((current) => (current === item.sourceKey ? null : item.sourceKey))
+                    }
+                    style={{
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      borderRadius: 999,
+                      borderWidth: 1,
+                      borderColor: colors.secondary,
+                      backgroundColor: "rgba(110, 203, 255, 0.12)",
+                      opacity: deletingKey === item.sourceKey ? 0.65 : 1,
+                      flexShrink: 1,
+                    }}
+                  >
+                    <Text
+                      style={{ color: colors.secondary, fontSize: 11, fontWeight: "800", letterSpacing: 0.6 }}
+                      numberOfLines={1}
+                    >
+                      {previewKey === item.sourceKey ? "HIDE VIDEO" : "WATCH VIDEO"}
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  disabled={deletingKey === item.sourceKey}
+                  onPress={() => confirmDelete(item)}
+                    style={{
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                    borderRadius: 999,
+                    borderWidth: 1,
+                      borderColor: colors.danger,
+                      backgroundColor: "rgba(255, 123, 123, 0.12)",
+                      opacity: deletingKey === item.sourceKey ? 0.65 : 1,
+                      flexShrink: 1,
+                    }}
+                  >
+                    <Text
+                      style={{ color: colors.danger, fontSize: 11, fontWeight: "800", letterSpacing: 0.6 }}
+                      numberOfLines={1}
+                    >
+                      {deletingKey === item.sourceKey ? "DELETING..." : "DELETE"}
+                    </Text>
+                </TouchableOpacity>
+              </View>
             </View>
             {(item.detectedErrors || []).length === 0 ? (
               <Text style={commonStyles.subtitle}>No stored error list for this record.</Text>
@@ -168,6 +205,26 @@ export default function SessionHistoryScreen() {
                 </Text>
               ))
             )}
+
+            {previewKey === item.sourceKey && item.localVideoUri ? (
+              <>
+                <View
+                  style={{
+                    marginTop: 16,
+                    overflow: "hidden",
+                    borderRadius: 20,
+                    borderWidth: 1,
+                    borderColor: colors.border,
+                    backgroundColor: "#040b15",
+                  }}
+                >
+                  <ArchivedVideoPlayer videoUrl={item.localVideoUri} />
+                </View>
+                <Text style={[commonStyles.subtitle, { marginTop: 10, fontSize: 12 }]}>
+                  This annotated session video is stored locally on this phone and can be replayed offline.
+                </Text>
+              </>
+            ) : null}
           </View>
         ))
       )}
@@ -213,4 +270,54 @@ function classificationColor(classification) {
   if (label.includes("fair")) return colors.warning;
   if (label.includes("poor")) return colors.danger;
   return colors.text;
+}
+
+function ArchivedVideoPlayer({ videoUrl }) {
+  const player = useVideoPlayer(
+    {
+      uri: videoUrl,
+      useCaching: true,
+    },
+    (instance) => {
+      instance.loop = true;
+    }
+  );
+  const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
+
+  return (
+    <View>
+      <VideoView
+        style={{ width: "100%", height: 240, backgroundColor: "#040b15" }}
+        player={player}
+        nativeControls
+        allowsFullscreen
+        contentFit="contain"
+      />
+      <View style={{ padding: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onPress={() => {
+            if (isPlaying) {
+              player.pause();
+            } else {
+              player.play();
+            }
+          }}
+          style={{
+            borderRadius: 14,
+            borderWidth: 1,
+            borderColor: colors.primary,
+            backgroundColor: "rgba(255, 122, 26, 0.12)",
+            paddingVertical: 12,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text style={{ color: colors.primary, fontSize: 14, fontWeight: "800" }}>
+            {isPlaying ? "Pause Saved Video" : "Play Saved Video"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
 }

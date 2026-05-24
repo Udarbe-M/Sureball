@@ -2,6 +2,7 @@ import "react-native-gesture-handler";
 import React from "react";
 import { DefaultTheme, NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
+import { Feather } from "@expo/vector-icons";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import LoginScreen from "./src/screens/LoginScreen";
@@ -29,20 +30,22 @@ const navTheme = {
   },
 };
 
-function HeaderAction({ label, onPress }) {
+function HeaderAction({ onPress }) {
   return (
     <TouchableOpacity
       onPress={onPress}
       style={{
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        borderRadius: 999,
+        width: 42,
+        height: 42,
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 21,
         borderWidth: 1,
         borderColor: colors.border,
         backgroundColor: colors.backgroundSoft,
       }}
     >
-      <Text style={{ color: colors.text, fontSize: 12, fontWeight: "800", letterSpacing: 0.8 }}>{label}</Text>
+      <Feather name="settings" size={18} color={colors.text} />
     </TouchableOpacity>
   );
 }
@@ -84,10 +87,10 @@ function AppNavigator() {
               component={DashboardScreen}
               options={({ navigation }) => ({
                 title: "SureBall Dashboard",
-                headerRight: () => <HeaderAction label="Menu" onPress={() => navigation.navigate("PlayerMenu")} />,
+                headerRight: () => <HeaderAction onPress={() => navigation.navigate("PlayerMenu")} />,
               })}
             />
-            <Stack.Screen name="PlayerMenu" component={ProfileMenuScreen} options={{ title: "Player Menu" }} />
+            <Stack.Screen name="PlayerMenu" component={ProfileMenuScreen} options={{ title: "Settings" }} />
             <Stack.Screen name="CoachingModes" component={CoachingModeScreen} options={{ title: "Select Coaching Mode" }} />
             <Stack.Screen name="LiveAnalysis" component={LiveAnalysisScreen} options={{ title: "Coaching Video Analysis" }} />
             <Stack.Screen

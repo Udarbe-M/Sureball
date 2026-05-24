@@ -40,6 +40,24 @@ export function isSupabaseReady() {
   return Boolean(supabase);
 }
 
+function mapAuthError(error) {
+  const message = String(error?.message || error || "").trim();
+
+  if (/email address .* not authorized/i.test(message)) {
+    return new Error(
+      "This Supabase project is still using the default email sender. Verification emails only go to project team addresses until custom SMTP is configured."
+    );
+  }
+
+  if (/rate limit/i.test(message) || /too many requests/i.test(message)) {
+    return new Error(
+      "Supabase temporarily blocked another auth email. Wait a moment and try again, or check the project's SMTP and rate-limit settings."
+    );
+  }
+
+  return new Error(message || "Supabase authentication failed.");
+}
+
 function requireSupabase() {
   if (!supabase) {
     throw new Error("Supabase is not configured. Add the project URL and publishable key first.");
@@ -93,7 +111,7 @@ export async function signInWithEmail({ email, password }) {
   });
 
   if (error) {
-    throw new Error(error.message);
+    throw mapAuthError(error);
   }
 
   return data;
@@ -117,7 +135,7 @@ export async function signUpWithEmail({ email, password, playerName }) {
   });
 
   if (error) {
-    throw new Error(error.message);
+    throw mapAuthError(error);
   }
 
   return {
@@ -127,11 +145,32 @@ export async function signUpWithEmail({ email, password, playerName }) {
   };
 }
 
+export async function resendSignupVerification(email) {
+  const client = requireSupabase();
+  const payload = {
+    type: "signup",
+    email: String(email || "").trim().toLowerCase(),
+  };
+
+  if (SUPABASE_EMAIL_REDIRECT_TO) {
+    payload.options = {
+      emailRedirectTo: SUPABASE_EMAIL_REDIRECT_TO,
+    };
+  }
+
+  const { error } = await client.auth.resend(payload);
+  if (error) {
+    throw mapAuthError(error);
+  }
+
+  return { resent: true };
+}
+
 export async function signOutUser() {
   const client = requireSupabase();
   const { error } = await client.auth.signOut();
   if (error) {
-    throw new Error(error.message);
+    throw mapAuthError(error);
   }
 }
 
@@ -231,7 +270,7 @@ export async function updateCurrentPassword({ currentPassword = "", newPassword 
 
   const { error } = await client.auth.updateUser(payload);
   if (error) {
-    throw new Error(`Unable to update password: ${error.message}`);
+    throw new Error(`Unable to update password: ${mapAuthError(error).message}`);
   }
 
   return { updated: true };
