@@ -9,7 +9,15 @@ except ImportError:  # pragma: no cover
     ScoreResult = None  # type: ignore[assignment]
 
 
-ModeName = Literal["shooting_form", "defensive_stance", "basic_footwork", "footwork"]
+ModeName = Literal[
+    "unified_coaching",
+    "shooting_form",
+    "dribbling",
+    "passing",
+    "defensive_stance",
+    "basic_footwork",
+    "footwork",
+]
 SeverityLevel = Literal["Minor", "Moderate", "Major"]
 Classification = Literal["Excellent", "Good", "Needs Improvement", "Poor"]
 
@@ -68,6 +76,10 @@ def score_movement(
 
     if normalized_mode == "shooting_form":
         detected_errors = _score_shooting_form(metrics)
+    elif normalized_mode == "dribbling":
+        detected_errors = _score_dribbling(metrics)
+    elif normalized_mode == "passing":
+        detected_errors = _score_passing(metrics)
     elif normalized_mode == "defensive_stance":
         detected_errors = _score_defensive_stance(metrics)
     else:
@@ -260,6 +272,100 @@ def _score_defensive_stance(metrics: Mapping[str, float]) -> list[DetectedError]
             issue="Hands too low",
             metric="hands_height_score",
             recommendation="Keep the hands active and higher in the passing lane.",
+        )
+    )
+
+    return issues
+
+
+def _score_dribbling(metrics: Mapping[str, float]) -> list[DetectedError]:
+    issues: list[DetectedError] = []
+
+    issues.extend(
+        _greater_than_error(
+            value=_metric(metrics, "knee_bend_angle"),
+            thresholds=[(145.0, "Minor", 4), (155.0, "Moderate", 8), (165.0, "Major", 12)],
+            code="high_dribble_stance",
+            issue="Dribble stance too high",
+            metric="knee_bend_angle",
+            recommendation="Drop the hips and keep the knees loaded while dribbling.",
+        )
+    )
+    issues.extend(
+        _greater_than_error(
+            value=_metric(metrics, "ball_to_wrist_distance"),
+            thresholds=[(0.32, "Minor", 4), (0.46, "Moderate", 8), (0.60, "Major", 12)],
+            code="loose_handle",
+            issue="Loose dribble control",
+            metric="ball_to_wrist_distance",
+            recommendation="Keep the ball closer to the dribbling hand.",
+        )
+    )
+    issues.extend(
+        _greater_than_error(
+            value=_metric(metrics, "ball_body_offset"),
+            thresholds=[(0.75, "Minor", 3), (1.00, "Moderate", 7), (1.20, "Major", 11)],
+            code="wide_dribble_path",
+            issue="Ball path too wide",
+            metric="ball_body_offset",
+            recommendation="Control the ball closer to your frame.",
+        )
+    )
+    issues.extend(
+        _greater_than_error(
+            value=_metric(metrics, "body_balance"),
+            thresholds=[(0.12, "Minor", 4), (0.20, "Moderate", 8), (0.28, "Major", 12)],
+            code="dribble_balance",
+            issue="Unbalanced dribble posture",
+            metric="body_balance",
+            recommendation="Stay centered over your base while handling the ball.",
+        )
+    )
+
+    return issues
+
+
+def _score_passing(metrics: Mapping[str, float]) -> list[DetectedError]:
+    issues: list[DetectedError] = []
+
+    issues.extend(
+        _less_than_error(
+            value=_metric(metrics, "elbow_angle"),
+            thresholds=[(55.0, "Major", 12), (70.0, "Moderate", 8), (85.0, "Minor", 4)],
+            code="pass_not_extended",
+            issue="Pass release not extended",
+            metric="elbow_angle",
+            recommendation="Extend through the pass and finish toward the target.",
+        )
+    )
+    issues.extend(
+        _greater_than_error(
+            value=_metric(metrics, "wrist_alignment"),
+            thresholds=[(0.18, "Minor", 4), (0.28, "Moderate", 8), (0.38, "Major", 12)],
+            code="pass_line_off",
+            issue="Passing line is off",
+            metric="wrist_alignment",
+            recommendation="Keep the wrist and elbow aligned through release.",
+        )
+    )
+    issues.extend(
+        _greater_than_error(
+            value=_metric(metrics, "ball_to_wrist_distance"),
+            thresholds=[(0.26, "Minor", 4), (0.38, "Moderate", 8), (0.50, "Major", 12)],
+            code="pass_ball_disconnected",
+            issue="Ball disconnected from hand",
+            metric="ball_to_wrist_distance",
+            recommendation="Keep the ball connected to your passing hand before release.",
+        )
+    )
+    issues.extend(
+        _greater_than_error(
+            value=_metric(metrics, "body_balance"),
+            thresholds=[(0.12, "Minor", 4), (0.20, "Moderate", 8), (0.28, "Major", 12)],
+            code="pass_balance",
+            issue="Unbalanced passing posture",
+            metric="body_balance",
+            recommendation="Stay balanced through the pass.",
         )
     )
 

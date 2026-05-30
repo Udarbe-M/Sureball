@@ -6,8 +6,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Linking, ScrollView, Switch, Text, TouchableOpacity, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
-import { buildShootingTrainingDownloadUrl, fetchShootingTrainingStatus, startShootingTraining } from "../services/api";
-import { saveAnnotatedVideoLocally, saveSessionRecord } from "../services/storage";
+import {
+  buildShootingTrainingDownloadUrl,
+  cancelShootingTraining,
+  fetchShootingTrainingStatus,
+  startShootingTraining,
+} from "../services/api";
+import { Haptics, hapticImpact, hapticSelection, hapticSuccess, hapticWarning } from "../services/haptics";
+import { archiveCompletedSession } from "../services/sessionArchive";
 import { commonStyles } from "../theme/styles";
 import { colors } from "../theme/colors";
 import { buildUserKey } from "../utils/userKey";
@@ -41,6 +47,7 @@ export default function ShootingTrainingScreen() {
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState("idle");
   const [progress, setProgress] = useState(0);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [stats, setStats] = useState(INITIAL_STATS);
   const [summary, setSummary] = useState("");
   const [classification, setClassification] = useState("");
@@ -53,6 +60,7 @@ export default function ShootingTrainingScreen() {
   const [recordingStatus, setRecordingStatus] = useState("Ready to record a new clip.");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
+  const uploadAbortRef = useRef(null);
   const userKey = useMemo(
     () => buildUserKey({ userId, playerName, playerEmail }),
     [playerEmail, playerName, userId]
@@ -66,7 +74,7 @@ export default function ShootingTrainingScreen() {
     const timer = setInterval(async () => {
       try {
         const result = await fetchShootingTrainingStatus(jobId);
-        setProgress(result.progress_percentage || 0);
+        setProgress(clampPercent(result.progress_percentage));
         setStats(result.stats || INITIAL_STATS);
         setSummary(result.summary || "");
         setClassification(result.classification || "");
@@ -74,47 +82,51 @@ export default function ShootingTrainingScreen() {
         if (result.status === "completed") {
           const archivedAt = new Date().toISOString();
           const remoteVideoUrl = buildShootingTrainingDownloadUrl(jobId);
-          let localVideoUri = "";
-
-          try {
-            localVideoUri = await saveAnnotatedVideoLocally({
-              remoteUrl: remoteVideoUrl,
+          const archiveResult = await archiveCompletedSession({
+            userKey,
+            remoteVideoUrl,
+            videoSaveOptions: {
               sessionId: jobId,
               mode: "shooting_training",
               timestamp: archivedAt,
               suffix: "shot-lab",
-            });
-            setArchiveMessageTone("success");
-            setArchiveMessage("Annotated video saved on this phone for offline playback in Session History.");
-          } catch (downloadError) {
-            setArchiveMessageTone("warning");
-            setArchiveMessage(
-              `Training finished, but the offline video copy could not be saved: ${String(downloadError.message || downloadError)}`
-            );
-          }
-
-          setStatus("completed");
-          await saveSessionRecord(userKey, {
-            id: jobId,
-            userKey,
-            playerName,
-            playerEmail,
-            mode: "shooting_training",
-            modeLabel: "Shooting Training",
-            score: Number(result.stats?.accuracy || 0),
-            classification: result.classification || "Needs Improvement",
-            detectedErrors: [],
-            timestamp: archivedAt,
-            summary: result.summary || "",
-            localVideoUri: localVideoUri || null,
+            },
+            record: {
+              id: jobId,
+              userKey,
+              playerName,
+              playerEmail,
+              mode: "shooting_training",
+              modeLabel: "Shooting Training",
+              score: Number(result.stats?.accuracy || 0),
+              classification: result.classification || "Needs Improvement",
+              detectedErrors: [],
+              timestamp: archivedAt,
+              summary: result.summary || "",
+            },
+            messages: {
+              success: "Annotated video saved on this phone for offline playback in Session History.",
+              disabled: "Training finished. Automatic video saving is turned off in Settings.",
+              failurePrefix: "Training finished, but the offline video copy could not be saved",
+            },
           });
+          setArchiveMessageTone(archiveResult.archiveMessageTone);
+          setArchiveMessage(archiveResult.archiveMessage);
+          setStatus("completed");
+          hapticSuccess();
+        } else if (result.status === "cancelled") {
+          setStatus("cancelled");
+          setErrorMessage("Training analysis cancelled.");
+          hapticWarning();
         } else if (result.status === "error") {
           setStatus("error");
           setErrorMessage(result.error_message || "Shot training failed.");
+          hapticWarning();
         }
       } catch (error) {
         setStatus("error");
         setErrorMessage(String(error.message || error));
+        hapticWarning();
       }
     }, 1500);
 
@@ -148,6 +160,7 @@ export default function ShootingTrainingScreen() {
   }, [selectedVideo, videoSource]);
 
   async function pickVideo() {
+    hapticSelection();
     const result = await DocumentPicker.getDocumentAsync({
       type: "video/*",
       copyToCacheDirectory: true,
@@ -163,6 +176,7 @@ export default function ShootingTrainingScreen() {
   }
 
   async function openCameraRecorder() {
+    hapticSelection();
     if (!cameraPermission?.granted) {
       const permissionResult = await requestCameraPermission();
       if (!permissionResult.granted) {
@@ -183,6 +197,7 @@ export default function ShootingTrainingScreen() {
     }
 
     setErrorMessage("");
+    hapticImpact(Haptics.ImpactFeedbackStyle.Medium);
     setRecording(true);
     setRecordingStatus("Recording in progress...");
 
@@ -215,6 +230,7 @@ export default function ShootingTrainingScreen() {
     if (!cameraRef.current || !recording) {
       return;
     }
+    hapticImpact(Haptics.ImpactFeedbackStyle.Heavy);
     cameraRef.current.stopRecording();
     setRecordingStatus("Finishing clip...");
   }
@@ -242,21 +258,53 @@ export default function ShootingTrainingScreen() {
     setClassification("");
     setStats(INITIAL_STATS);
     setProgress(0);
+    setUploadProgress(0);
 
     try {
+      hapticImpact(Haptics.ImpactFeedbackStyle.Medium);
+      const abortController = new AbortController();
+      uploadAbortRef.current = abortController;
+      setStatus("uploading");
       const result = await startShootingTraining({
         videoAsset: selectedVideo,
         overlayMode,
         testMode,
         userKey,
+        abortSignal: abortController.signal,
+        onUploadProgress: (value) => setUploadProgress(clampPercent(value)),
       });
       setJobId(result.file_id);
       setStatus("processing");
     } catch (error) {
-      setStatus("error");
-      setErrorMessage(String(error.message || error));
+      if (error.name === "AbortError") {
+        setStatus("cancelled");
+        setErrorMessage("Upload cancelled. The selected clip is still ready to retry.");
+      } else {
+        setStatus("error");
+        setErrorMessage(String(error.message || error));
+      }
+      hapticWarning();
     } finally {
+      uploadAbortRef.current = null;
       setStarting(false);
+    }
+  }
+
+  async function handleCancelTraining() {
+    if (uploadAbortRef.current) {
+      uploadAbortRef.current.abort();
+      return;
+    }
+    if (status === "processing" && jobId) {
+      try {
+        await cancelShootingTraining(jobId);
+        setStatus("cancelled");
+        setErrorMessage("Training analysis cancelled.");
+      } catch (error) {
+        setStatus("error");
+        setErrorMessage(String(error.message || error));
+      }
+      hapticWarning();
     }
   }
 
@@ -277,7 +325,10 @@ export default function ShootingTrainingScreen() {
     setErrorMessage("");
     setArchiveMessage("");
     setArchiveMessageTone("neutral");
+    setUploadProgress(0);
   }
+
+  const busyWithAnalysis = status === "processing" || status === "uploading" || starting;
 
   return (
     <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
@@ -298,14 +349,14 @@ export default function ShootingTrainingScreen() {
             title="Choose Video"
             description="Pick a saved training clip"
             onPress={pickVideo}
-            disabled={status === "processing" || starting || recording}
+            disabled={busyWithAnalysis || recording}
           />
           <SourceButton
             active={videoSource === "camera"}
             title="Record Live"
             description="Capture from the camera now"
             onPress={openCameraRecorder}
-            disabled={status === "processing" || starting}
+            disabled={busyWithAnalysis}
           />
         </View>
         <Text style={[commonStyles.subtitle, { marginTop: 14, color: colors.text }]}>Selected: {selectedVideoLabel}</Text>
@@ -359,22 +410,22 @@ export default function ShootingTrainingScreen() {
             <PrimaryButton title="Allow Camera" onPress={requestCameraPermission} />
           )}
 
-          <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
-            <View style={{ flex: 1 }}>
+          <View style={{ alignItems: "center", marginTop: 14 }}>
+            <View style={{ width: "72%", maxWidth: 280 }}>
               <PrimaryButton
                 title={recording ? "Recording..." : "Start Recording"}
                 onPress={startRecordingClip}
                 loading={false}
-                disabled={!cameraPermission?.granted || recording}
+                disabled={!cameraPermission?.granted || recording || busyWithAnalysis}
               />
             </View>
-            <View style={{ flex: 1 }}>
-              <PrimaryButton
-                title={recording ? "Stop Recording" : "Close Camera"}
-                onPress={recording ? stopRecordingClip : closeCameraRecorder}
-                disabled={starting || status === "processing"}
-              />
-            </View>
+          </View>
+          <View style={{ marginTop: 10 }}>
+            <PrimaryButton
+              title={recording ? "Stop Recording" : "Close Camera"}
+              onPress={recording ? stopRecordingClip : closeCameraRecorder}
+              disabled={busyWithAnalysis}
+            />
           </View>
         </View>
       ) : null}
@@ -387,7 +438,7 @@ export default function ShootingTrainingScreen() {
             <TouchableOpacity
               key={option.id}
               onPress={() => setOverlayMode(option.id)}
-              disabled={status === "processing" || starting}
+              disabled={busyWithAnalysis}
               style={{
                 marginTop: 12,
                 borderRadius: 18,
@@ -418,15 +469,15 @@ export default function ShootingTrainingScreen() {
             onValueChange={setTestMode}
             thumbColor="#ffffff"
             trackColor={{ false: colors.border, true: colors.primary }}
-            disabled={status === "processing" || starting || recording}
+            disabled={busyWithAnalysis || recording}
           />
         </View>
 
         <PrimaryButton
-          title={starting || status === "processing" ? "Analyzing..." : "Start Shot Training"}
+          title={busyWithAnalysis ? "Working..." : "Start Shot Training"}
           onPress={handleStartTraining}
           loading={starting}
-          disabled={!selectedVideo || status === "processing" || recording}
+          disabled={!selectedVideo || busyWithAnalysis || recording}
         />
       </View>
 
@@ -435,7 +486,45 @@ export default function ShootingTrainingScreen() {
         <Text style={[commonStyles.subtitle, { color: colors.text }]}>
           Status: {status === "idle" ? "Waiting to start" : status.replace(/_/g, " ")}
         </Text>
-        <Text style={[commonStyles.subtitle, { color: colors.text }]}>Progress: {progress}%</Text>
+        {status === "uploading" || uploadProgress > 0 ? (
+          <ProgressMeter label="Upload" value={uploadProgress} color={colors.secondary} />
+        ) : null}
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>Progress: {clampPercent(progress)}%</Text>
+        <ProgressMeter label="Analysis" value={progress} color={colors.primary} />
+
+        {busyWithAnalysis ? (
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={handleCancelTraining}
+            style={{
+              marginTop: 14,
+              borderRadius: 999,
+              borderWidth: 1,
+              borderColor: colors.danger,
+              backgroundColor: "rgba(255, 123, 123, 0.14)",
+              paddingVertical: 12,
+              alignItems: "center",
+            }}
+          >
+            <Text style={{ color: colors.danger, fontSize: 13, fontWeight: "900" }}>Cancel Training</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        {(status === "error" || status === "cancelled") && selectedVideo ? (
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={handleStartTraining}
+            style={{
+              marginTop: 14,
+              borderRadius: 999,
+              backgroundColor: colors.primary,
+              paddingVertical: 12,
+              alignItems: "center",
+            }}
+          >
+            <Text style={{ color: "#091220", fontSize: 13, fontWeight: "900" }}>Retry Training</Text>
+          </TouchableOpacity>
+        ) : null}
 
         <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
           <StatCard label="Attempts" value={stats.attempts} color={colors.secondary} />
@@ -491,6 +580,37 @@ export default function ShootingTrainingScreen() {
       </View>
     </ScrollView>
   );
+}
+
+function ProgressMeter({ label, value, color }) {
+  const normalizedValue = clampPercent(value);
+  return (
+    <View style={{ marginTop: 10 }}>
+      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+        <Text style={{ color: colors.text, fontSize: 12, fontWeight: "900" }}>{label}</Text>
+        <Text style={{ color: colors.text, fontSize: 12, fontWeight: "900" }}>{normalizedValue}%</Text>
+      </View>
+      <View
+        style={{
+          height: 8,
+          borderRadius: 999,
+          backgroundColor: colors.track,
+          overflow: "hidden",
+          marginTop: 8,
+        }}
+      >
+        <View style={{ width: `${normalizedValue}%`, height: "100%", borderRadius: 999, backgroundColor: color }} />
+      </View>
+    </View>
+  );
+}
+
+function clampPercent(value) {
+  const numericValue = Number(value || 0);
+  if (!Number.isFinite(numericValue)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(Math.round(numericValue), 100));
 }
 
 function ResultVideoPlayer({ videoUrl }) {

@@ -1,0 +1,36 @@
+{
+  "backend_url": "http://127.0.0.1:8000",
+  "samples": [
+    {
+      "id": "dribble-baseline-01",
+      "mode": "dribbling",
+      "video_path": "backend/validation/clips/dribble-baseline-01.mp4",
+      "expected_action_count": 8,
+      "tolerance": 1,
+      "test_mode": false,
+      "notes": "One player in frame, full body visible, ball visible through most contacts."
+    },
+    {
+      "id": "chest-pass-01",
+      "mode": "passing",
+      "video_path": "backend/validation/clips/chest-pass-01.mp4",
+      "expected_action_count": 5,
+      "tolerance": 1,
+      "test_mode": false,
+      "notes": "Count only completed releases from controlled possession."
+    },
+    {
+      "id": "shooting-baseline-01",
+      "mode": "shooting_form",
+      "video_path": "backend/validation/clips/shooting-baseline-01.mp4",
+      "expected_action_count": 10,
+      "expected_makes": 6,
+      "expected_misses": 4,
+      "expected_accuracy": 60.0,
+      "tolerance": 1,
+      "accuracy_tolerance": 8.0,
+      "test_mode": false,
+      "notes": "Keep shooter, ball, and rim visible. Human label shots, makes, misses, and accuracy."
+    }
+  ]
+}

@@ -8,7 +8,7 @@ import numpy as np
 
 from .feedback_engine import extract_features, generate_feedback
 from .scoring import calculate_score
-from .schemas import FeedbackCue, FrameAnalysisResponse
+from .schemas import FeedbackCue, FrameAnalysisResponse, ScoreResult
 from .utils import draw_text_block, frame_to_base64, now_utc
 
 
@@ -28,7 +28,10 @@ def run_coaching_analysis(
     ball_box = ball_detector.detect(frame)
     features = extract_features(mode=mode, landmarks=pose_result["landmarks"], ball_box=ball_box)
     feedback, summary = generate_feedback(mode=mode, features=features, ball_detected=ball_box is not None)
-    if not pose_result["pose_detected"]:
+    pose_detected = bool(pose_result["pose_detected"])
+    ball_detected = ball_box is not None
+
+    if not pose_detected:
         feedback.insert(
             0,
             FeedbackCue(
@@ -38,7 +41,18 @@ def run_coaching_analysis(
                 deduction=18,
             ),
         )
+    if not pose_detected and not ball_detected:
+        feedback.insert(
+            0,
+            FeedbackCue(
+                code="no_valid_basketball_action",
+                message="No player or basketball detected. Use a clip where the athlete and ball are clearly visible.",
+                severity="high",
+                deduction=40,
+            ),
+        )
     score = calculate_score(feedback)
+    score = _cap_invalid_frame_score(score, pose_detected=pose_detected, ball_detected=ball_detected)
 
     annotated = pose_estimator.draw(frame, pose_result.get("drawing_landmarks") or pose_result["raw_landmarks"])
     if ball_box:
@@ -72,8 +86,8 @@ def run_coaching_analysis(
         mode=mode,
         timestamp=now_utc(),
         frame_index=frame_index,
-        pose_detected=bool(pose_result["pose_detected"]),
-        ball_detected=ball_box is not None,
+        pose_detected=pose_detected,
+        ball_detected=ball_detected,
         features=features,
         feedback=feedback,
         score=score,
@@ -87,3 +101,23 @@ def run_coaching_analysis(
         "response": response,
         "annotated_frame": annotated,
     }
+
+
+def _cap_invalid_frame_score(score: ScoreResult, *, pose_detected: bool, ball_detected: bool) -> ScoreResult:
+    cap = None
+    if not pose_detected and not ball_detected:
+        cap = 12
+    elif not pose_detected:
+        cap = 25
+    elif not ball_detected:
+        cap = 55
+
+    if cap is None or score.score <= cap:
+        return score
+
+    capped_score = max(0, cap)
+    return ScoreResult(
+        score=capped_score,
+        deductions=max(score.deductions, 100 - capped_score),
+        classification="Poor" if capped_score < 58 else score.classification,
+    )

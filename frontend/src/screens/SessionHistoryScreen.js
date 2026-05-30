@@ -1,10 +1,16 @@
 import { useEvent } from "expo";
 import { VideoView, useVideoPlayer } from "expo-video";
-import React, { useCallback, useState } from "react";
-import { Alert, RefreshControl, ScrollView, Text, TouchableOpacity, View } from "react-native";
+import React, { useCallback, useMemo, useState } from "react";
+import { Alert, Linking, RefreshControl, ScrollView, Text, TouchableOpacity, View } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { useAuth } from "../context/AuthContext";
-import { deleteSessionFromBackend, fetchSessionsFromBackend } from "../services/api";
+import {
+  buildCoachingVideoDownloadUrl,
+  buildShootingTrainingDownloadUrl,
+  deleteSessionFromBackend,
+  fetchSessionsFromBackend,
+} from "../services/api";
+import { hapticSelection, hapticSuccess, hapticWarning } from "../services/haptics";
 import { deleteLocalSessionRecord, getLocalSessionHistory } from "../services/storage";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
@@ -19,13 +25,17 @@ function mergeHistory(localSessions, backendSessions) {
   const normalizedBackend = backendSessions.map((item) => ({
     id: item.session_id,
     mode: item.mode,
+    sourceType: item.source_type,
     modeLabel: humanizeMode(item.mode),
     score: item.score,
+    actionCount: item.action_count || 0,
+    actionLabel: item.action_label || "",
     classification: item.classification,
     detectedErrors: [],
     timestamp: item.timestamp,
     summary: item.summary,
     sourceKey: item.session_id,
+    remoteVideoUrl: buildRemoteVideoUrl(item.mode, item.session_id, item.source_type),
   }));
   const full = [...normalizedLocal, ...normalizedBackend];
   const seen = new Set();
@@ -39,6 +49,19 @@ function mergeHistory(localSessions, backendSessions) {
   return deduped.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 }
 
+function buildRemoteVideoUrl(mode, sessionId, sourceType = null) {
+  if (!sessionId) {
+    return null;
+  }
+  if (sourceType === "shot_training_video" || mode === "shooting_training") {
+    return buildShootingTrainingDownloadUrl(sessionId);
+  }
+  if (sourceType === "video" && ["shooting_form", "dribbling", "passing"].includes(mode)) {
+    return buildCoachingVideoDownloadUrl(sessionId);
+  }
+  return null;
+}
+
 export default function SessionHistoryScreen() {
   const { playerEmail, playerName, userId } = useAuth();
   const userKey = buildUserKey({ userId, playerName, playerEmail });
@@ -46,6 +69,26 @@ export default function SessionHistoryScreen() {
   const [history, setHistory] = useState([]);
   const [deletingKey, setDeletingKey] = useState(null);
   const [previewKey, setPreviewKey] = useState(null);
+  const [selectedFilter, setSelectedFilter] = useState("all");
+
+  const filterOptions = useMemo(() => {
+    const availableModes = [...new Set(history.map((item) => item.mode).filter(Boolean))];
+    return [
+      { id: "all", label: "All" },
+      { id: "saved_video", label: "Saved Videos" },
+      ...availableModes.map((mode) => ({ id: mode, label: humanizeMode(mode) })),
+    ];
+  }, [history]);
+
+  const visibleHistory = useMemo(() => {
+    if (selectedFilter === "all") {
+      return history;
+    }
+    if (selectedFilter === "saved_video") {
+      return history.filter((item) => item.localVideoUri);
+    }
+    return history.filter((item) => item.mode === selectedFilter);
+  }, [history, selectedFilter]);
 
   const loadHistory = useCallback(async () => {
     setLoading(true);
@@ -90,12 +133,34 @@ export default function SessionHistoryScreen() {
       if (item.id) {
         await deleteSessionFromBackend(item.id, userKey);
       }
+      hapticSuccess();
       await loadHistory();
     } catch (error) {
+      hapticWarning();
       Alert.alert("Delete failed", String(error.message || error));
     } finally {
       setDeletingKey(null);
     }
+  }
+
+  async function openSessionVideo(item) {
+    const videoUrl = item.localVideoUri || item.remoteVideoUrl || buildRemoteVideoUrl(item.mode, item.id, item.sourceType);
+    if (!videoUrl) {
+      Alert.alert("Video unavailable", "This session does not have an annotated video to open.");
+      return;
+    }
+    try {
+      hapticSelection();
+      await Linking.openURL(videoUrl);
+    } catch (error) {
+      Alert.alert("Video unavailable", String(error.message || error));
+    }
+  }
+
+  function handleFilterChange(filterId) {
+    hapticSelection();
+    setSelectedFilter(filterId);
+    setPreviewKey(null);
   }
 
   return (
@@ -112,6 +177,36 @@ export default function SessionHistoryScreen() {
         </Text>
       </View>
 
+      {history.length > 0 ? (
+        <View style={commonStyles.card}>
+          <Text style={commonStyles.label}>Filter</Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
+            {filterOptions.map((option) => {
+              const active = selectedFilter === option.id;
+              return (
+                <TouchableOpacity
+                  key={option.id}
+                  activeOpacity={0.9}
+                  onPress={() => handleFilterChange(option.id)}
+                  style={{
+                    borderRadius: 999,
+                    borderWidth: 1,
+                    borderColor: active ? colors.primary : colors.border,
+                    backgroundColor: active ? colors.primary : colors.backgroundSoft,
+                    paddingHorizontal: 14,
+                    paddingVertical: 10,
+                  }}
+                >
+                  <Text style={{ color: active ? "#091220" : colors.text, fontSize: 12, fontWeight: "900" }}>
+                    {option.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      ) : null}
+
       {history.length === 0 ? (
         <View style={commonStyles.card}>
           <Text style={commonStyles.sectionTitle}>No Sessions Yet</Text>
@@ -119,8 +214,13 @@ export default function SessionHistoryScreen() {
             Complete a live analysis or shooting training run to start building your performance timeline.
           </Text>
         </View>
+      ) : visibleHistory.length === 0 ? (
+        <View style={commonStyles.card}>
+          <Text style={commonStyles.sectionTitle}>No Matching Sessions</Text>
+          <Text style={commonStyles.subtitle}>Try another filter or record a new session in this mode.</Text>
+        </View>
       ) : (
-        history.map((item, index) => (
+        visibleHistory.map((item, index) => (
           <View key={`${item.id || "session"}-${index}`} style={commonStyles.card}>
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
               <View style={{ flex: 1 }}>
@@ -135,7 +235,9 @@ export default function SessionHistoryScreen() {
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
               <InfoPill label={item.classification || "Pending"} color={classificationColor(item.classification)} />
               <InfoPill label={new Date(item.timestamp).toLocaleString()} color={colors.secondary} />
+              {item.actionLabel ? <InfoPill label={`${item.actionLabel}: ${item.actionCount || 0}`} color={colors.accent} /> : null}
               {item.localVideoUri ? <InfoPill label="Offline Video Saved" color={colors.success} /> : null}
+              {!item.localVideoUri && item.remoteVideoUrl ? <InfoPill label="Backend Video" color={colors.warning} /> : null}
             </View>
 
             {item.summary ? (
@@ -150,9 +252,10 @@ export default function SessionHistoryScreen() {
                   <TouchableOpacity
                     activeOpacity={0.85}
                     disabled={deletingKey === item.sourceKey}
-                    onPress={() =>
-                      setPreviewKey((current) => (current === item.sourceKey ? null : item.sourceKey))
-                    }
+                    onPress={() => {
+                      hapticSelection();
+                      setPreviewKey((current) => (current === item.sourceKey ? null : item.sourceKey));
+                    }}
                     style={{
                       paddingHorizontal: 12,
                       paddingVertical: 8,
@@ -172,27 +275,51 @@ export default function SessionHistoryScreen() {
                     </Text>
                   </TouchableOpacity>
                 ) : null}
-                <TouchableOpacity
-                  activeOpacity={0.85}
-                  disabled={deletingKey === item.sourceKey}
-                  onPress={() => confirmDelete(item)}
+                {item.localVideoUri || item.remoteVideoUrl ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    disabled={deletingKey === item.sourceKey}
+                    onPress={() => openSessionVideo(item)}
                     style={{
                       paddingHorizontal: 12,
                       paddingVertical: 8,
-                    borderRadius: 999,
-                    borderWidth: 1,
-                      borderColor: colors.danger,
-                      backgroundColor: "rgba(255, 123, 123, 0.12)",
+                      borderRadius: 999,
+                      borderWidth: 1,
+                      borderColor: colors.primary,
+                      backgroundColor: "rgba(255, 122, 26, 0.12)",
                       opacity: deletingKey === item.sourceKey ? 0.65 : 1,
                       flexShrink: 1,
                     }}
                   >
                     <Text
-                      style={{ color: colors.danger, fontSize: 11, fontWeight: "800", letterSpacing: 0.6 }}
+                      style={{ color: colors.primary, fontSize: 11, fontWeight: "800", letterSpacing: 0.6 }}
                       numberOfLines={1}
                     >
-                      {deletingKey === item.sourceKey ? "DELETING..." : "DELETE"}
+                      OPEN VIDEO
                     </Text>
+                  </TouchableOpacity>
+                ) : null}
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  disabled={deletingKey === item.sourceKey}
+                  onPress={() => confirmDelete(item)}
+                  style={{
+                    paddingHorizontal: 12,
+                    paddingVertical: 8,
+                    borderRadius: 999,
+                    borderWidth: 1,
+                    borderColor: colors.danger,
+                    backgroundColor: "rgba(255, 123, 123, 0.12)",
+                    opacity: deletingKey === item.sourceKey ? 0.65 : 1,
+                    flexShrink: 1,
+                  }}
+                >
+                  <Text
+                    style={{ color: colors.danger, fontSize: 11, fontWeight: "800", letterSpacing: 0.6 }}
+                    numberOfLines={1}
+                  >
+                    {deletingKey === item.sourceKey ? "DELETING..." : "DELETE"}
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>

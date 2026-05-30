@@ -49,22 +49,29 @@ export default function DashboardScreen({ navigation }) {
       </View>
 
       <ActionCard
-        eyebrow="Live Drill"
-        title="Start Coaching Session"
-        description="Choose a mode and open the camera flow for real-time basketball feedback."
+        eyebrow="Coaching Mode"
+        title="Open Camera Coaching"
+        description="Jump into the camera flow with Shooting, Dribbling, and Passing available from the coaching menu."
         accentColor={colors.primary}
         action={
-          <PrimaryButton title="Choose Mode" onPress={() => navigation.navigate("CoachingModes")} />
+          <PrimaryButton title="Open Coaching Mode" onPress={() => navigation.navigate("CoachingModes")} />
         }
       />
 
       <ActionCard
         eyebrow="Shot Lab"
-        title="Train Shooting With Video"
-        description="Upload a shooting clip to break down attempts, makes, misses, and overall percentage."
+        title="Jump Straight To Shooting"
+        description="Open the camera coaching screen with shooting selected and ready."
         accentColor={colors.secondary}
         action={
-          <PrimaryButton title="Open Shooting Training" onPress={() => navigation.navigate("ShootingTraining")} />
+          <PrimaryButton
+            title="Open Shooting"
+            onPress={() =>
+              navigation.navigate("CoachingModes", {
+                initialModeId: "shooting_form",
+              })
+            }
+          />
         }
       />
 

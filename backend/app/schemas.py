@@ -6,11 +6,19 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-CoachingMode = Literal["shooting_form", "defensive_stance", "basic_footwork", "shot_training"]
+CoachingMode = Literal[
+    "unified_coaching",
+    "shooting_form",
+    "dribbling",
+    "passing",
+    "defensive_stance",
+    "basic_footwork",
+    "shot_training",
+]
 ShotTrainingOverlayMode = Literal["full_tracking", "focus_stats", "stats_only"]
-ShotTrainingStatus = Literal["queued", "processing", "completed", "error", "not_found"]
+ShotTrainingStatus = Literal["queued", "processing", "completed", "error", "cancelled", "not_found"]
 CoachingVideoOverlayMode = Literal["full_overlay", "focus_feedback", "score_only"]
-CoachingVideoStatus = Literal["queued", "processing", "completed", "error", "not_found"]
+CoachingVideoStatus = Literal["queued", "processing", "completed", "error", "cancelled", "not_found"]
 
 
 class Point2D(BaseModel):
@@ -95,6 +103,8 @@ class SessionRecord(BaseModel):
     classification: str
     summary: str
     source_type: Literal["frame", "video", "shot_training_video"]
+    action_count: int = 0
+    action_label: Optional[str] = None
     user_key: Optional[str] = None
 
 
@@ -155,9 +165,16 @@ class CoachingVideoStatusResponse(BaseModel):
     total_frames: int = 0
     progress_percentage: int = 0
     analyzed_frames: int = 0
+    pose_frames: int = 0
+    ball_frames: int = 0
+    pose_detection_rate: float = 0.0
+    ball_detection_rate: float = 0.0
     average_score: float = 0.0
     best_score: int = 0
     worst_score: int = 0
+    action_count: int = 0
+    action_label: Optional[str] = None
+    shooting_stats: ShotTrainingStats = Field(default_factory=ShotTrainingStats)
     dominant_feedback: List[str] = Field(default_factory=list)
     classification: Optional[str] = None
     summary: Optional[str] = None

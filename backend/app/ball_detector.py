@@ -19,10 +19,14 @@ class BallDetector:
 
     def __init__(self, model_path: Optional[str] = None) -> None:
         backend_dir = Path(__file__).resolve().parents[1]
+        repo_dir = backend_dir.parent
         models_dir = backend_dir / "models"
         configured_model = os.getenv("BALL_DETECTOR_MODEL")
         candidate_paths = [
+            repo_dir / "basketball_detection_yolo11s.pt",
             models_dir / "basketball_detection_yolo11s.pt",
+            repo_dir / "yolo11s.pt",
+            repo_dir / "yolo11n.pt",
             models_dir / "yolo11n.pt",
             backend_dir / "yolo11n.pt",
         ]

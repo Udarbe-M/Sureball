@@ -12,6 +12,7 @@ Simple thesis-prototype mobile frontend for SureBall.
 
 ## Features
 
+- Unified coaching session hub for coaching analysis and shooting training
 - Camera capture via `expo-camera`
 - Coaching video upload/record flow with in-app preview and download
 - Real-time feedback text + score display

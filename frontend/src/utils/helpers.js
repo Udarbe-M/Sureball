@@ -1,7 +1,4 @@
 export function mapModeToBackend(modeId) {
-  if (modeId === "footwork") {
-    return "basic_footwork";
-  }
   return modeId;
 }
 

@@ -6,21 +6,21 @@ import ModeCard from "../components/ModeCard";
 const MODES = [
   {
     id: "shooting_form",
-    title: "Shooting Form",
+    title: "Shooting",
     tag: "Precision",
     description: "Analyze elbow alignment, wrist control, knee bend, and shooting balance.",
   },
   {
-    id: "defensive_stance",
-    title: "Defensive Stance",
-    tag: "Defense",
-    description: "Evaluate stance width, low base, torso readiness, and body balance.",
+    id: "dribbling",
+    title: "Dribbling",
+    tag: "Handle",
+    description: "Analyze low handle position, ball-to-hand connection, stance, and balance.",
   },
   {
-    id: "footwork",
-    title: "Footwork",
-    tag: "Movement",
-    description: "Assess spacing, posture stability, movement timing, and coordination.",
+    id: "passing",
+    title: "Passing",
+    tag: "Pass",
+    description: "Evaluate passing line, ball control, release window, and body balance.",
   },
 ];
 
