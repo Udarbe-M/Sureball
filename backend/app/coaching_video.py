@@ -16,6 +16,7 @@ from .shot_training import (
     ANNOTATED_VIDEO_CRF,
     ANNOTATED_VIDEO_PRESET,
     AnnotatedVideoWriter,
+    SHOT_TRAINING_COLORS,
     SHOT_TRAINING_CONFIDENCE_OVERRIDES,
     ShotTrainingTracker,
     _apply_orientation_correction,
@@ -29,6 +30,7 @@ COACHING_VIDEO_UPLOADS_DIR = DATA_DIR / "coaching_video_uploads"
 COACHING_VIDEO_OUTPUTS_DIR = DATA_DIR / "coaching_video_outputs"
 COACHING_VIDEO_MAX_SECONDS = 180
 COACHING_VIDEO_TEST_SECONDS = 15
+SHOOTING_DETECTION_BOX_LABELS = {"player_shooting", "basket"}
 
 coaching_video_jobs: Dict[str, Dict[str, object]] = {}
 coaching_video_lock = threading.Lock()
@@ -120,7 +122,7 @@ class CoachingVideoJob:
         self.overlay_mode = overlay_mode
         self.test_mode = test_mode
         self.user_key = user_key
-        self.sample_stride = max(1, sample_stride)
+        self.sample_stride = effective_coaching_sample_stride(mode, sample_stride)
 
     def run(self) -> None:
         capture = cv2.VideoCapture(str(self.input_path))
@@ -203,6 +205,7 @@ class CoachingVideoJob:
 
             while frame_index < max_frames:
                 _raise_if_cancelled(self.file_id)
+                shot_detections: list[Dict[str, float | str]] = []
                 if shot_tracker is not None:
                     shot_detections = self.ball_detector.detect_training_objects(
                         frame,
@@ -255,6 +258,7 @@ class CoachingVideoJob:
                     response=response,
                     action_counter=action_counter,
                     shot_tracker=shot_tracker,
+                    shot_detections=shot_detections,
                 )
                 writer.write(annotated)
 
@@ -408,7 +412,11 @@ class CoachingVideoJob:
         response: Any,
         action_counter: CoachingActionCounter,
         shot_tracker: Optional[ShotTrainingTracker] = None,
+        shot_detections: Optional[list[Dict[str, float | str]]] = None,
     ) -> None:
+        if shot_tracker is not None and shot_detections:
+            _draw_shooting_detection_boxes(frame, shot_detections)
+
         if self.overlay_mode in {"full_overlay", "focus_feedback"}:
             overlay = frame.copy()
             cv2.rectangle(overlay, (18, 18), (frame.shape[1] - 18, 92), (10, 16, 28), -1)
@@ -627,6 +635,13 @@ def _raise_if_cancelled(file_id: str) -> None:
             raise CoachingVideoCancelled()
 
 
+def effective_coaching_sample_stride(mode: str, sample_stride: int) -> int:
+    normalized_stride = max(1, sample_stride)
+    if mode == "dribbling":
+        return min(normalized_stride, 2)
+    return normalized_stride
+
+
 def _action_label_for_mode(mode: str) -> Optional[str]:
     if mode == "dribbling":
         return "Dribbles"
@@ -717,19 +732,37 @@ def _draw_panel_stat(
     cv2.putText(frame, value, (x + value_x_offset, y + 1), cv2.FONT_HERSHEY_SIMPLEX, value_scale, color, 2, cv2.LINE_AA)
 
 
+def _draw_shooting_detection_boxes(frame: np.ndarray, detections: list[Dict[str, float | str]]) -> None:
+    for detection in detections:
+        label = str(detection.get("label") or "")
+        if label not in SHOOTING_DETECTION_BOX_LABELS:
+            continue
+
+        display_label = str(detection.get("display_label") or label.replace("_", " ").title())
+        confidence = float(detection.get("confidence", 0.0))
+        x1 = int(float(detection["x1"]))
+        y1 = int(float(detection["y1"]))
+        x2 = int(float(detection["x2"]))
+        y2 = int(float(detection["y2"]))
+        color = SHOT_TRAINING_COLORS.get(label, (255, 255, 255))
+        text = f"{display_label} {confidence:.2f}"
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        text_origin = (x1, max(18, y1 - 8))
+        cv2.putText(
+            frame,
+            text,
+            text_origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+
 def _has_shooting_evidence(response: Any) -> bool:
-    if not bool(getattr(response, "pose_detected", False)) or not bool(getattr(response, "ball_detected", False)):
-        return False
-
-    features = getattr(response, "features", None)
-    hand_distance = _feature_float(features, "ball_to_wrist_distance")
-    ball_zone = _feature_value(features, "ball_vertical_zone")
-    release_position = _feature_float(features, "ball_release_position")
-
-    near_hand = hand_distance is not None and hand_distance <= 0.8
-    in_shooting_zone = ball_zone in {"torso", "high"}
-    near_release_height = release_position is not None and release_position >= -0.05
-    return near_hand and (in_shooting_zone or near_release_height)
+    return bool(getattr(response, "pose_detected", False)) and bool(getattr(response, "ball_detected", False))
 
 
 def _feature_value(features: Any, key: str) -> Any:

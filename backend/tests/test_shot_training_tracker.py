@@ -1,6 +1,6 @@
 import unittest
 
-from backend.app.shot_training import ShotTrainingTracker
+from backend.app.shot_training import SHOT_TRAINING_CONFIDENCE_OVERRIDES, ShotTrainingTracker
 
 
 def shot_detection():
@@ -20,6 +20,10 @@ def ball_detection(x1=104, y1=96, x2=118, y2=110):
 
 
 class ShotTrainingTrackerTests(unittest.TestCase):
+    def test_shot_training_keeps_lower_ball_confidence_thresholds(self):
+        self.assertNotIn("ball", SHOT_TRAINING_CONFIDENCE_OVERRIDES)
+        self.assertLess(SHOT_TRAINING_CONFIDENCE_OVERRIDES["ball_in_basket"], 0.70)
+
     def test_continuous_shot_signal_does_not_create_ghost_second_attempt(self):
         tracker = ShotTrainingTracker(30)
 
@@ -89,6 +93,36 @@ class ShotTrainingTrackerTests(unittest.TestCase):
         self.assertEqual(
             tracker.to_stats(),
             {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
+        )
+
+    def test_ball_in_basket_counts_make_when_shooting_pose_label_is_missed(self):
+        tracker = ShotTrainingTracker(30)
+
+        for frame_index in range(80):
+            detections = []
+            if 20 <= frame_index <= 35:
+                detections.extend(make_detection())
+            tracker.observe(detections, frame_index)
+
+        self.assertEqual(
+            tracker.to_stats(),
+            {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
+        )
+
+    def test_inferred_make_without_shooting_pose_label_does_not_count(self):
+        tracker = ShotTrainingTracker(30)
+
+        for frame_index in range(40):
+            detections = []
+            if frame_index == 0:
+                detections.extend(basket_detection())
+            if frame_index == 10:
+                detections.extend(ball_detection())
+            tracker.observe(detections, frame_index)
+
+        self.assertEqual(
+            tracker.to_stats(),
+            {"attempts": 0, "makes": 0, "misses": 0, "accuracy": 0.0},
         )
 
 

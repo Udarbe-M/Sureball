@@ -15,6 +15,7 @@ from .coaching_analysis import run_coaching_analysis
 from .coaching_video import (
     CoachingActionCounter,
     cancel_coaching_video_job,
+    effective_coaching_sample_stride,
     ensure_coaching_video_dirs,
     get_coaching_video_output_path,
     get_coaching_video_status,
@@ -313,7 +314,7 @@ async def analyze_video(
             if not success:
                 break
             processed_frames += 1
-            if frame_index % max(sample_stride, 1) == 0:
+            if frame_index % effective_coaching_sample_stride(mode, sample_stride) == 0:
                 result = run_coaching_analysis(
                     frame,
                     mode=mode,
@@ -409,13 +410,7 @@ async def analyze_video(
 
 
 def _has_shooting_evidence(result: FrameAnalysisResponse) -> bool:
-    if not result.pose_detected or not result.ball_detected:
-        return False
-    features = result.features
-    near_hand = features.ball_to_wrist_distance is not None and features.ball_to_wrist_distance <= 0.8
-    in_shooting_zone = features.ball_vertical_zone in {"torso", "high"}
-    near_release_height = features.ball_release_position is not None and features.ball_release_position >= -0.05
-    return near_hand and (in_shooting_zone or near_release_height)
+    return result.pose_detected and result.ball_detected
 
 
 def _save_session_record(

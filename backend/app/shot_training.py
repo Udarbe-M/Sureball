@@ -287,6 +287,7 @@ class ShotTrainingTracker:
         self.pending_shot_streak = 0
         self.active_attempt_frame: Optional[int] = None
         self.awaiting_shot_reset = False
+        self.direct_make_detection_active = False
         self.shot_cooldown_frames = max(1, int(self.fps * SHOT_COOLDOWN_SECONDS))
         self.make_cooldown_frames = max(1, int(self.fps * MAKE_COOLDOWN_SECONDS))
         self.banner_duration_frames = max(10, int(self.fps * MAKE_BANNER_SECONDS))
@@ -337,7 +338,9 @@ class ShotTrainingTracker:
             self._start_attempt(frame_index, "Shot attempt detected")
             self.pending_shot_streak = 0
 
-        make_detection = _best_detection(detections, "ball_in_basket") or _infer_make_detection(
+        direct_make_detection = _best_detection(detections, "ball_in_basket")
+        direct_make_started = direct_make_detection is not None and not self.direct_make_detection_active
+        make_detection = direct_make_detection or _infer_make_detection(
             detections,
             basket_detection=basket_detection,
             last_basket_center=self.last_basket_center,
@@ -346,12 +349,15 @@ class ShotTrainingTracker:
         if make_detection and frame_index - self.last_make_frame >= self.make_cooldown_frames:
             if self.active_attempt_frame is None and self._recent_shot_signal(frame_index):
                 self._start_attempt(frame_index, "Shot attempt inferred")
+            elif self.active_attempt_frame is None and direct_make_started:
+                self._start_attempt(frame_index, "Made basket detected")
             if self.active_attempt_frame is not None:
                 self.makes += 1
                 self.last_make_frame = frame_index
                 self._resolve_attempt(frame_index, made=True, banner_text="Made basket detected")
                 if self.last_basket_center is None:
                     self.last_basket_center = _detection_center(make_detection)
+        self.direct_make_detection_active = direct_make_detection is not None
 
         if (
             self.active_attempt_frame is not None
