@@ -1,10 +1,18 @@
 import React, { useRef, useState } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
-import PrimaryButton from "../components/PrimaryButton";
+import {
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import { useAuth } from "../context/AuthContext";
 import { isSupabaseReady, normalizePlayerName } from "../services/supabase";
 import { colors } from "../theme/colors";
-import { commonStyles } from "../theme/styles";
 
 export default function LoginScreen() {
   const [authMode, setAuthMode] = useState("login");
@@ -103,9 +111,7 @@ export default function LoginScreen() {
         if (result.needsEmailVerification) {
           setPendingVerificationEmail(normalizedEmail);
           setMessageTone("success");
-          setMessage(
-            "Check your email to confirm the account, then return here to sign in. If nothing arrives, the Supabase project likely still needs custom SMTP or a team-authorized test address."
-          );
+          setMessage("Check your email to confirm the account, then return here to sign in.");
         }
       } else {
         await signIn({
@@ -137,9 +143,7 @@ export default function LoginScreen() {
       await resendVerificationEmail(normalizedEmail);
       setPendingVerificationEmail(normalizedEmail);
       setMessageTone("success");
-      setMessage(
-        "A new verification email was requested. If it still does not arrive, check Supabase SMTP setup, team-email restrictions, and spam folders."
-      );
+      setMessage("A new verification email was requested. Check your inbox and spam folder.");
     } catch (error) {
       setMessageTone("error");
       setMessage(String(error.message || error));
@@ -148,80 +152,42 @@ export default function LoginScreen() {
     }
   }
 
+  const actionDisabled = (authMode === "login" || registerMode === "account") && !isSupabaseReady();
+
   return (
-    <View style={[commonStyles.screenCentered, { justifyContent: "flex-start" }]}>
-      <View
-        style={{
-          position: "absolute",
-          top: 88,
-          right: -42,
-          width: 180,
-          height: 180,
-          borderRadius: 90,
-          backgroundColor: "rgba(255, 122, 26, 0.14)",
-        }}
-      />
-      <View
-        style={{
-          position: "absolute",
-          bottom: 120,
-          left: -70,
-          width: 220,
-          height: 220,
-          borderRadius: 110,
-          backgroundColor: "rgba(110, 203, 255, 0.1)",
-        }}
-      />
-      <KeyboardAvoidingView
-        style={{ flex: 1, width: "100%" }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-      >
+    <View style={authStyles.screen}>
+      <KeyboardAvoidingView style={{ flex: 1, width: "100%" }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
         <ScrollView
           ref={scrollViewRef}
           style={{ flex: 1 }}
-          contentContainerStyle={{
-            flexGrow: 1,
-            justifyContent: "center",
-            paddingTop: 48,
-            paddingBottom: 32,
-          }}
+          contentContainerStyle={authStyles.content}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
           showsVerticalScrollIndicator={false}
         >
-          <View style={commonStyles.heroCard}>
-            <Text style={commonStyles.eyebrow}>Court Vision</Text>
-            <Text style={[commonStyles.title, { marginTop: 10 }]}>SureBall</Text>
-            <Text style={commonStyles.subtitle}>
-              Sign in with your player account, or create a guest profile if you just want to test the app quickly.
-            </Text>
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
-              <View style={commonStyles.pill}>
-                <Text style={commonStyles.pillText}>Email Auth</Text>
-              </View>
-              <View style={commonStyles.pill}>
-                <Text style={commonStyles.pillText}>Profile Sync</Text>
-              </View>
+          <View style={authStyles.brandBlock}>
+            <View style={authStyles.logoMark}>
+              <Text style={authStyles.logoText}>SB</Text>
             </View>
+            <Text style={authStyles.brandName}>SureBall</Text>
+            <Text style={authStyles.brandCopy}>Camera-first basketball coaching.</Text>
           </View>
 
-          <View ref={formCardRef} style={commonStyles.card}>
-            <Text style={commonStyles.eyebrow}>Account Access</Text>
-            <Text style={[commonStyles.sectionTitle, { marginTop: 10 }]}>
-              {authMode === "login" ? "Welcome Back" : "Create Your Player Account"}
-            </Text>
-            <Text style={commonStyles.subtitle}>
+          <View ref={formCardRef} style={authStyles.sheet}>
+            <Text style={authStyles.sheetEyebrow}>Account</Text>
+            <Text style={authStyles.sheetTitle}>{authMode === "login" ? "Sign in" : "Sign up"}</Text>
+            <Text style={authStyles.sheetCopy}>
               {authMode === "login"
-                ? "Use your registered email and password to open the training dashboard."
+                ? "Open the camera, record a clip, and get coaching feedback."
                 : registerMode === "guest"
-                  ? "Create a local guest profile with just a player name. No email verification is required."
-                  : "Register once, verify your email if prompted, and your player profile will be created automatically."}
+                  ? "Create a local guest profile and start recording right away."
+                  : "Create your player account, then use the camera coaching flow."}
             </Text>
 
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
+            <View style={authStyles.toggleRow}>
               <ModeToggle
                 active={authMode === "login"}
-                label="Login"
+                label="Sign in"
                 onPress={() => {
                   setAuthMode("login");
                   setMessage("");
@@ -230,7 +196,7 @@ export default function LoginScreen() {
               />
               <ModeToggle
                 active={authMode === "register"}
-                label="Register"
+                label="Sign up"
                 onPress={() => {
                   setAuthMode("register");
                   setMessage("");
@@ -239,10 +205,10 @@ export default function LoginScreen() {
             </View>
 
             {authMode === "register" ? (
-              <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+              <View style={authStyles.toggleRow}>
                 <ModeToggle
                   active={registerMode === "account"}
-                  label="Email Account"
+                  label="Email"
                   onPress={() => {
                     setRegisterMode("account");
                     setMessage("");
@@ -250,7 +216,7 @@ export default function LoginScreen() {
                 />
                 <ModeToggle
                   active={registerMode === "guest"}
-                  label="Guest User"
+                  label="Guest"
                   onPress={() => {
                     setRegisterMode("guest");
                     setMessage("");
@@ -262,9 +228,9 @@ export default function LoginScreen() {
 
             {authMode === "register" ? (
               <View ref={nameFieldRef}>
-                <Text style={[commonStyles.label, { marginTop: 18 }]}>Player Name</Text>
+                <Text style={authStyles.label}>Player Name</Text>
                 <TextInput
-                  style={commonStyles.input}
+                  style={authStyles.input}
                   placeholder="Enter your player name"
                   placeholderTextColor={colors.muted}
                   value={name}
@@ -280,9 +246,9 @@ export default function LoginScreen() {
             {authMode === "login" || registerMode === "account" ? (
               <>
                 <View ref={emailFieldRef}>
-                  <Text style={[commonStyles.label, { marginTop: 18 }]}>Email</Text>
+                  <Text style={authStyles.label}>Email</Text>
                   <TextInput
-                    style={commonStyles.input}
+                    style={authStyles.input}
                     placeholder="email@address.com"
                     placeholderTextColor={colors.muted}
                     value={email}
@@ -296,9 +262,9 @@ export default function LoginScreen() {
                 </View>
 
                 <View ref={passwordFieldRef}>
-                  <Text style={[commonStyles.label, { marginTop: 14 }]}>Password</Text>
+                  <Text style={authStyles.label}>Password</Text>
                   <TextInput
-                    style={commonStyles.input}
+                    style={authStyles.input}
                     placeholder="Enter your password"
                     placeholderTextColor={colors.muted}
                     value={password}
@@ -314,25 +280,17 @@ export default function LoginScreen() {
             ) : null}
 
             {(authMode === "login" || registerMode === "account") && !isSupabaseReady() ? (
-              <Text style={{ marginTop: 10, color: colors.danger, fontSize: 13 }}>
-                Supabase is not configured yet. Add your project URL and publishable key before using login.
+              <Text style={authStyles.errorText}>
+                Supabase is not configured yet. Add your project URL and publishable key before using email auth.
               </Text>
             ) : null}
 
             {authMode === "login" ? (
-              <Text style={[commonStyles.subtitle, { fontSize: 12 }]}>
-                Want to test without email? Switch to Register and choose `Guest User`.
-              </Text>
+              <Text style={authStyles.smallHint}>Testing locally? Switch to Sign up and choose Guest.</Text>
             ) : null}
 
             {message ? (
-              <Text
-                style={{
-                  marginTop: 10,
-                  color: messageTone === "success" ? colors.success : colors.danger,
-                  fontSize: 13,
-                }}
-              >
+              <Text style={[authStyles.message, { color: messageTone === "success" ? colors.success : colors.danger }]}>
                 {message}
               </Text>
             ) : null}
@@ -342,28 +300,19 @@ export default function LoginScreen() {
                 activeOpacity={0.85}
                 disabled={resendingVerification || saving}
                 onPress={handleResendVerification}
-                style={{
-                  marginTop: 12,
-                  paddingVertical: 10,
-                  alignItems: "center",
-                  borderRadius: 14,
-                  borderWidth: 1,
-                  borderColor: colors.border,
-                  backgroundColor: colors.backgroundSoft,
-                  opacity: resendingVerification || saving ? 0.7 : 1,
-                }}
+                style={[authStyles.secondaryButton, (resendingVerification || saving) && { opacity: 0.7 }]}
               >
-                <Text style={{ color: colors.secondary, fontWeight: "800", letterSpacing: 0.5 }}>
-                  {resendingVerification ? "Sending Verification Email..." : "Resend Verification Email"}
+                <Text style={authStyles.secondaryButtonText}>
+                  {resendingVerification ? "Sending verification..." : "Resend verification email"}
                 </Text>
               </TouchableOpacity>
             ) : null}
 
-            <PrimaryButton
-              title={authMode === "login" ? "Login" : registerMode === "guest" ? "Continue As Guest" : "Register"}
+            <AuthButton
+              title={authMode === "login" ? "Sign in" : registerMode === "guest" ? "Continue as guest" : "Create account"}
               onPress={handleSubmit}
               loading={saving}
-              disabled={(authMode === "login" || registerMode === "account") && !isSupabaseReady()}
+              disabled={actionDisabled}
             />
           </View>
         </ScrollView>
@@ -377,17 +326,178 @@ function ModeToggle({ active, label, onPress }) {
     <TouchableOpacity
       activeOpacity={0.9}
       onPress={onPress}
-      style={{
-        flex: 1,
-        borderRadius: 16,
-        borderWidth: 1,
-        borderColor: active ? colors.primary : colors.border,
-        backgroundColor: active ? "rgba(255, 122, 26, 0.12)" : colors.backgroundSoft,
-        paddingVertical: 12,
-        alignItems: "center",
-      }}
+      style={[authStyles.modeToggle, active && authStyles.modeToggleActive]}
     >
-      <Text style={{ color: colors.text, fontWeight: "800", letterSpacing: 0.8 }}>{label}</Text>
+      <Text style={[authStyles.modeToggleText, active && authStyles.modeToggleTextActive]}>{label}</Text>
     </TouchableOpacity>
   );
 }
+
+function AuthButton({ title, onPress, loading = false, disabled = false }) {
+  const isDisabled = disabled || loading;
+  return (
+    <TouchableOpacity
+      activeOpacity={0.9}
+      onPress={onPress}
+      disabled={isDisabled}
+      style={[authStyles.primaryButton, isDisabled && { opacity: 0.55 }]}
+    >
+      {loading ? <ActivityIndicator color="#091220" /> : <Text style={authStyles.primaryButtonText}>{title}</Text>}
+    </TouchableOpacity>
+  );
+}
+
+const authStyles = StyleSheet.create({
+  screen: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  content: {
+    flexGrow: 1,
+    justifyContent: "space-between",
+    paddingTop: 62,
+  },
+  brandBlock: {
+    alignItems: "center",
+    paddingHorizontal: 28,
+    paddingBottom: 28,
+  },
+  logoMark: {
+    width: 82,
+    height: 82,
+    borderRadius: 28,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.cardElevated,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  logoText: {
+    color: colors.primary,
+    fontSize: 26,
+    fontWeight: "900",
+  },
+  brandName: {
+    marginTop: 22,
+    color: colors.text,
+    fontSize: 42,
+    fontWeight: "900",
+  },
+  brandCopy: {
+    marginTop: 8,
+    color: colors.muted,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  sheet: {
+    borderTopLeftRadius: 34,
+    borderTopRightRadius: 34,
+    backgroundColor: colors.card,
+    paddingHorizontal: 20,
+    paddingTop: 24,
+    paddingBottom: 28,
+    minHeight: 460,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+  },
+  sheetEyebrow: {
+    color: colors.primary,
+    fontSize: 11,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  sheetTitle: {
+    marginTop: 6,
+    color: colors.text,
+    fontSize: 30,
+    fontWeight: "900",
+  },
+  sheetCopy: {
+    marginTop: 8,
+    color: colors.muted,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  toggleRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 16,
+  },
+  modeToggle: {
+    flex: 1,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: colors.border,
+    backgroundColor: colors.backgroundSoft,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  modeToggleActive: {
+    borderColor: colors.primary,
+    backgroundColor: "rgba(255, 122, 26, 0.14)",
+  },
+  modeToggleText: {
+    color: colors.muted,
+    fontWeight: "900",
+  },
+  modeToggleTextActive: {
+    color: colors.primary,
+  },
+  label: {
+    marginTop: 16,
+    color: colors.text,
+    fontSize: 11,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  input: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 18,
+    paddingHorizontal: 15,
+    paddingVertical: 14,
+    backgroundColor: colors.backgroundSoft,
+    color: colors.text,
+  },
+  smallHint: {
+    marginTop: 12,
+    color: colors.muted,
+    fontSize: 12,
+  },
+  errorText: {
+    marginTop: 12,
+    color: colors.danger,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  message: {
+    marginTop: 12,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  secondaryButton: {
+    marginTop: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.secondary,
+    paddingVertical: 11,
+    alignItems: "center",
+  },
+  secondaryButtonText: {
+    color: colors.secondary,
+    fontWeight: "900",
+  },
+  primaryButton: {
+    marginTop: 18,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+    paddingVertical: 15,
+    alignItems: "center",
+  },
+  primaryButtonText: {
+    color: "#091220",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+});

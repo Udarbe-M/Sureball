@@ -49,26 +49,26 @@ export default function DashboardScreen({ navigation }) {
       </View>
 
       <ActionCard
-        eyebrow="Unified Hub"
-        title="Start Unified Coaching Session"
-        description="Choose coaching analysis or shooting training from one shared session flow."
+        eyebrow="Coaching Mode"
+        title="Open Camera Coaching"
+        description="Jump into the camera flow with Shooting, Dribbling, and Passing available from the coaching menu."
         accentColor={colors.primary}
         action={
-          <PrimaryButton title="Open Session Hub" onPress={() => navigation.navigate("UnifiedCoachingSession")} />
+          <PrimaryButton title="Open Coaching Mode" onPress={() => navigation.navigate("CoachingModes")} />
         }
       />
 
       <ActionCard
         eyebrow="Shot Lab"
-        title="Jump Straight To Shooting Training"
-        description="Open the same unified session screen with shooting training selected and ready."
+        title="Jump Straight To Shooting"
+        description="Open the camera coaching screen with shooting selected and ready."
         accentColor={colors.secondary}
         action={
           <PrimaryButton
-            title="Open Shooting Training"
+            title="Open Shooting"
             onPress={() =>
-              navigation.navigate("UnifiedCoachingSession", {
-                initialSessionType: "shooting_training",
+              navigation.navigate("CoachingModes", {
+                initialModeId: "shooting_form",
               })
             }
           />

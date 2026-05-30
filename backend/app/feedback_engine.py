@@ -67,6 +67,60 @@ def extract_features(mode: CoachingMode, landmarks: Dict[str, Dict[str, float]],
 
 
 def generate_feedback(mode: CoachingMode, features: FeatureSet, ball_detected: bool) -> Tuple[List[FeedbackCue], str]:
+    if mode == "unified_coaching":
+        return _generate_unified_feedback(features, ball_detected)
+
+    return _generate_mode_feedback(mode, features, ball_detected)
+
+
+def _generate_unified_feedback(features: FeatureSet, ball_detected: bool) -> Tuple[List[FeedbackCue], str]:
+    shooting_feedback, shooting_summary = _generate_mode_feedback("shooting_form", features, ball_detected)
+    dribbling_feedback, dribbling_summary = _generate_mode_feedback("dribbling", features, ball_detected)
+    passing_feedback, passing_summary = _generate_mode_feedback("passing", features, ball_detected)
+
+    combined_feedback: List[FeedbackCue] = []
+    seen_codes: set[str] = set()
+    for cue in [*shooting_feedback, *dribbling_feedback, *passing_feedback]:
+        if cue.code == "solid_form":
+            continue
+        if cue.code in seen_codes:
+            continue
+        seen_codes.add(cue.code)
+        combined_feedback.append(cue)
+
+    if not ball_detected:
+        combined_feedback = [
+            cue
+            for cue in combined_feedback
+            if cue.code not in {"ball_not_detected", "dribbling_ball_not_detected", "passing_ball_not_detected"}
+        ]
+        combined_feedback.append(
+            FeedbackCue(
+                code="unified_ball_not_detected",
+                message="Basketball not clearly detected. Keep the ball visible to unlock shooting, dribbling, and passing feedback.",
+                severity="low",
+                deduction=6,
+            )
+        )
+
+    if not combined_feedback:
+        combined_feedback.append(
+            FeedbackCue(
+                code="solid_form",
+                message="Strong rep across shooting, dribbling, and passing. Maintain this posture and rhythm.",
+                severity="low",
+                deduction=0,
+            )
+        )
+
+    summary = (
+        "Unified coaching reviewed the rep across shooting, dribbling, and passing. "
+        f"{shooting_summary} {dribbling_summary} {passing_summary}"
+    )
+    return combined_feedback, summary
+
+
+def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detected: bool) -> Tuple[List[FeedbackCue], str]:
     feedback: List[FeedbackCue] = []
 
     if mode == "shooting_form":
@@ -116,6 +170,131 @@ def generate_feedback(mode: CoachingMode, features: FeatureSet, ball_detected: b
                 )
             )
         summary = "Shooting form evaluated with emphasis on elbow alignment, knee bend, ball control, and balance."
+
+    elif mode == "dribbling":
+        if features.knee_bend_angle is not None and features.knee_bend_angle > 155:
+            feedback.append(
+                FeedbackCue(
+                    code="dribbling_ready_knees",
+                    message="Drop your hips and keep a stronger knee bend while dribbling.",
+                    severity="medium",
+                    deduction=10,
+                )
+            )
+        if features.body_balance is not None and features.body_balance > 0.22:
+            feedback.append(
+                FeedbackCue(
+                    code="dribbling_balance",
+                    message="Stay centered over your base so the handle stays controlled.",
+                    severity="medium",
+                    deduction=8,
+                )
+            )
+        if ball_detected:
+            if features.ball_to_wrist_distance is not None and features.ball_to_wrist_distance > 0.6:
+                feedback.append(
+                    FeedbackCue(
+                        code="dribbling_ball_connection",
+                        message="Keep the ball closer to your hand through the dribble.",
+                        severity="high",
+                        deduction=12,
+                    )
+                )
+            if features.ball_vertical_zone == "high":
+                feedback.append(
+                    FeedbackCue(
+                        code="dribbling_ball_height",
+                        message="Keep the dribble lower, around your hip or below.",
+                        severity="medium",
+                        deduction=10,
+                    )
+                )
+            if features.ball_body_offset is not None and features.ball_body_offset > 1.15:
+                feedback.append(
+                    FeedbackCue(
+                        code="dribbling_ball_path",
+                        message="Bring the ball path closer to your body instead of letting it drift wide.",
+                        severity="medium",
+                        deduction=8,
+                    )
+                )
+        else:
+            feedback.append(
+                FeedbackCue(
+                    code="dribbling_ball_not_detected",
+                    message="Basketball not detected. Keep the ball visible so YOLOv11 can track your handle.",
+                    severity="low",
+                    deduction=6,
+                )
+            )
+        summary = "Dribbling analyzed with YOLOv11 ball tracking and MediaPipe pose for handle control, stance, and balance."
+
+    elif mode == "passing":
+        if features.elbow_angle is not None and features.elbow_angle < 80:
+            feedback.append(
+                FeedbackCue(
+                    code="passing_elbow_extension",
+                    message="Extend through the pass so your arm finishes toward the target.",
+                    severity="medium",
+                    deduction=10,
+                )
+            )
+        if features.wrist_alignment is not None and features.wrist_alignment > 0.34:
+            feedback.append(
+                FeedbackCue(
+                    code="passing_release_line",
+                    message="Keep your wrist and elbow on a cleaner passing line.",
+                    severity="medium",
+                    deduction=8,
+                )
+            )
+        if features.body_balance is not None and features.body_balance > 0.22:
+            feedback.append(
+                FeedbackCue(
+                    code="passing_balance",
+                    message="Stay balanced through the pass instead of leaning out of frame.",
+                    severity="medium",
+                    deduction=8,
+                )
+            )
+        if ball_detected:
+            if features.ball_to_wrist_distance is not None and features.ball_to_wrist_distance > 0.5:
+                feedback.append(
+                    FeedbackCue(
+                        code="passing_ball_connection",
+                        message="Keep the ball connected to your passing hand before release.",
+                        severity="high",
+                        deduction=12,
+                    )
+                )
+            if features.ball_vertical_zone == "low":
+                feedback.append(
+                    FeedbackCue(
+                        code="passing_ball_window",
+                        message="Bring the pass into a stronger chest-to-shoulder passing window.",
+                        severity="medium",
+                        deduction=8,
+                    )
+                )
+            if features.ball_body_offset is not None and features.ball_body_offset > 1.25:
+                feedback.append(
+                    FeedbackCue(
+                        code="passing_ball_path",
+                        message="Keep the ball path tighter so the pass starts from your frame.",
+                        severity="medium",
+                        deduction=8,
+                    )
+                )
+        else:
+            feedback.append(
+                FeedbackCue(
+                    code="passing_ball_not_detected",
+                    message="Basketball not detected. Keep the ball visible so YOLOv11 can evaluate the pass.",
+                    severity="low",
+                    deduction=6,
+                )
+            )
+        summary = "Passing analyzed with YOLOv11 ball tracking and MediaPipe pose for release line, ball control, and balance."
 
     elif mode == "defensive_stance":
         if features.feet_spacing is not None and features.feet_spacing < 1.1:

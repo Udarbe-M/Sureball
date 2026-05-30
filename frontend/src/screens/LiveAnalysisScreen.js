@@ -8,10 +8,12 @@ import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
 import {
   buildCoachingVideoDownloadUrl,
+  cancelCoachingVideoAnalysis,
   fetchCoachingVideoStatus,
   startCoachingVideoAnalysis,
 } from "../services/api";
-import { saveAnnotatedVideoLocally, saveSessionRecord } from "../services/storage";
+import { Haptics, hapticImpact, hapticSelection, hapticSuccess, hapticWarning } from "../services/haptics";
+import { archiveCompletedSession } from "../services/sessionArchive";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
 import { buildUserKey } from "../utils/userKey";
@@ -36,7 +38,7 @@ const OVERLAY_OPTIONS = [
 
 export default function LiveAnalysisScreen({ route }) {
   const { playerEmail, playerName, userId } = useAuth();
-  const mode = route.params?.mode || { id: "shooting_form", title: "Shooting Form" };
+  const mode = route.params?.mode || { id: "shooting_form", title: "Shooting" };
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [videoSource, setVideoSource] = useState("upload");
   const [overlayMode, setOverlayMode] = useState("focus_feedback");
@@ -44,6 +46,7 @@ export default function LiveAnalysisScreen({ route }) {
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState("idle");
   const [progress, setProgress] = useState(0);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [analyzedFrames, setAnalyzedFrames] = useState(0);
   const [averageScore, setAverageScore] = useState(0);
   const [bestScore, setBestScore] = useState(0);
@@ -60,6 +63,7 @@ export default function LiveAnalysisScreen({ route }) {
   const [recordingStatus, setRecordingStatus] = useState("Ready to record a coaching drill.");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
+  const uploadAbortRef = useRef(null);
   const userKey = useMemo(
     () => buildUserKey({ userId, playerName, playerEmail }),
     [playerEmail, playerName, userId]
@@ -73,7 +77,7 @@ export default function LiveAnalysisScreen({ route }) {
     const timer = setInterval(async () => {
       try {
         const result = await fetchCoachingVideoStatus(jobId);
-        setProgress(result.progress_percentage || 0);
+        setProgress(clampPercent(result.progress_percentage));
         setAnalyzedFrames(result.analyzed_frames || 0);
         setAverageScore(result.average_score || 0);
         setBestScore(result.best_score || 0);
@@ -85,50 +89,54 @@ export default function LiveAnalysisScreen({ route }) {
         if (result.status === "completed") {
           const archivedAt = new Date().toISOString();
           const remoteVideoUrl = buildCoachingVideoDownloadUrl(result.file_id);
-          let localVideoUri = "";
-
-          try {
-            localVideoUri = await saveAnnotatedVideoLocally({
-              remoteUrl: remoteVideoUrl,
+          const archiveResult = await archiveCompletedSession({
+            userKey,
+            remoteVideoUrl,
+            videoSaveOptions: {
               sessionId: result.file_id,
               mode: mode.id,
               timestamp: archivedAt,
               suffix: "coaching",
-            });
-            setArchiveMessageTone("success");
-            setArchiveMessage("Annotated video saved on this phone for offline playback in Session History.");
-          } catch (downloadError) {
-            setArchiveMessageTone("warning");
-            setArchiveMessage(
-              `Analysis finished, but the offline video copy could not be saved: ${String(downloadError.message || downloadError)}`
-            );
-          }
-
-          setStatus("completed");
-          await saveSessionRecord(userKey, {
-            id: result.file_id,
-            userKey,
-            playerName,
-            playerEmail,
-            mode: mode.id,
-            modeLabel: mode.title,
-            score: result.average_score || 0,
-            classification: result.classification || "Needs Improvement",
-            detectedErrors: (result.dominant_feedback || []).map((message) => ({
-              issue: message,
-              severity: "Moderate",
-            })),
-            timestamp: archivedAt,
-            summary: result.summary || "",
-            localVideoUri: localVideoUri || null,
+            },
+            record: {
+              id: result.file_id,
+              userKey,
+              playerName,
+              playerEmail,
+              mode: mode.id,
+              modeLabel: mode.title,
+              score: result.average_score || 0,
+              classification: result.classification || "Needs Improvement",
+              detectedErrors: (result.dominant_feedback || []).map((message) => ({
+                issue: message,
+                severity: "Moderate",
+              })),
+              timestamp: archivedAt,
+              summary: result.summary || "",
+            },
+            messages: {
+              success: "Annotated video saved on this phone for offline playback in Session History.",
+              disabled: "Analysis finished. Automatic video saving is turned off in Settings.",
+              failurePrefix: "Analysis finished, but the offline video copy could not be saved",
+            },
           });
+          setArchiveMessageTone(archiveResult.archiveMessageTone);
+          setArchiveMessage(archiveResult.archiveMessage);
+          setStatus("completed");
+          hapticSuccess();
+        } else if (result.status === "cancelled") {
+          setStatus("cancelled");
+          setErrorMessage("Analysis cancelled.");
+          hapticWarning();
         } else if (result.status === "error") {
           setStatus("error");
           setErrorMessage(result.error_message || "Coaching video analysis failed.");
+          hapticWarning();
         }
       } catch (error) {
         setStatus("error");
         setErrorMessage(String(error.message || error));
+        hapticWarning();
       }
     }, 1500);
 
@@ -161,6 +169,7 @@ export default function LiveAnalysisScreen({ route }) {
   }, [selectedVideo, videoSource]);
 
   async function pickVideo() {
+    hapticSelection();
     const result = await DocumentPicker.getDocumentAsync({
       type: "video/*",
       copyToCacheDirectory: true,
@@ -176,6 +185,7 @@ export default function LiveAnalysisScreen({ route }) {
   }
 
   async function openCameraRecorder() {
+    hapticSelection();
     if (!cameraPermission?.granted) {
       const permissionResult = await requestCameraPermission();
       if (!permissionResult.granted) {
@@ -196,6 +206,7 @@ export default function LiveAnalysisScreen({ route }) {
     }
 
     setErrorMessage("");
+    hapticImpact(Haptics.ImpactFeedbackStyle.Medium);
     setRecording(true);
     setRecordingStatus("Recording in progress...");
 
@@ -228,6 +239,7 @@ export default function LiveAnalysisScreen({ route }) {
     if (!cameraRef.current || !recording) {
       return;
     }
+    hapticImpact(Haptics.ImpactFeedbackStyle.Heavy);
     cameraRef.current.stopRecording();
     setRecordingStatus("Finishing clip...");
   }
@@ -259,22 +271,54 @@ export default function LiveAnalysisScreen({ route }) {
     setWorstScore(0);
     setAnalyzedFrames(0);
     setProgress(0);
+    setUploadProgress(0);
 
     try {
+      hapticImpact(Haptics.ImpactFeedbackStyle.Medium);
+      const abortController = new AbortController();
+      uploadAbortRef.current = abortController;
+      setStatus("uploading");
       const result = await startCoachingVideoAnalysis({
         mode: mode.id,
         videoAsset: selectedVideo,
         overlayMode,
         testMode,
         userKey,
+        abortSignal: abortController.signal,
+        onUploadProgress: (value) => setUploadProgress(clampPercent(value)),
       });
       setJobId(result.file_id);
       setStatus("processing");
     } catch (error) {
-      setStatus("error");
-      setErrorMessage(String(error.message || error));
+      if (error.name === "AbortError") {
+        setStatus("cancelled");
+        setErrorMessage("Upload cancelled. The selected clip is still ready to retry.");
+      } else {
+        setStatus("error");
+        setErrorMessage(String(error.message || error));
+      }
+      hapticWarning();
     } finally {
+      uploadAbortRef.current = null;
       setStarting(false);
+    }
+  }
+
+  async function handleCancelAnalysis() {
+    if (uploadAbortRef.current) {
+      uploadAbortRef.current.abort();
+      return;
+    }
+    if (status === "processing" && jobId) {
+      try {
+        await cancelCoachingVideoAnalysis(jobId);
+        setStatus("cancelled");
+        setErrorMessage("Analysis cancelled.");
+      } catch (error) {
+        setStatus("error");
+        setErrorMessage(String(error.message || error));
+      }
+      hapticWarning();
     }
   }
 
@@ -299,7 +343,10 @@ export default function LiveAnalysisScreen({ route }) {
     setErrorMessage("");
     setArchiveMessage("");
     setArchiveMessageTone("neutral");
+    setUploadProgress(0);
   }
+
+  const busyWithAnalysis = status === "processing" || status === "uploading" || starting;
 
   return (
     <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
@@ -320,14 +367,14 @@ export default function LiveAnalysisScreen({ route }) {
             title="Choose Video"
             description="Pick a saved drill clip"
             onPress={pickVideo}
-            disabled={status === "processing" || starting || recording}
+            disabled={busyWithAnalysis || recording}
           />
           <SourceButton
             active={videoSource === "camera"}
             title="Record Live"
             description="Capture a new coaching rep"
             onPress={openCameraRecorder}
-            disabled={status === "processing" || starting}
+            disabled={busyWithAnalysis}
           />
         </View>
         <Text style={[commonStyles.subtitle, { marginTop: 14, color: colors.text }]}>Selected: {selectedVideoLabel}</Text>
@@ -381,21 +428,21 @@ export default function LiveAnalysisScreen({ route }) {
             <PrimaryButton title="Allow Camera" onPress={requestCameraPermission} />
           )}
 
-          <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
-            <View style={{ flex: 1 }}>
+          <View style={{ alignItems: "center", marginTop: 14 }}>
+            <View style={{ width: "72%", maxWidth: 280 }}>
               <PrimaryButton
                 title={recording ? "Recording..." : "Start Recording"}
                 onPress={startRecordingClip}
-                disabled={!cameraPermission?.granted || recording}
+                disabled={!cameraPermission?.granted || recording || busyWithAnalysis}
               />
             </View>
-            <View style={{ flex: 1 }}>
-              <PrimaryButton
-                title={recording ? "Stop Recording" : "Close Camera"}
-                onPress={recording ? stopRecordingClip : closeCameraRecorder}
-                disabled={starting || status === "processing"}
-              />
-            </View>
+          </View>
+          <View style={{ marginTop: 10 }}>
+            <PrimaryButton
+              title={recording ? "Stop Recording" : "Close Camera"}
+              onPress={recording ? stopRecordingClip : closeCameraRecorder}
+              disabled={busyWithAnalysis}
+            />
           </View>
         </View>
       ) : null}
@@ -408,7 +455,7 @@ export default function LiveAnalysisScreen({ route }) {
             <TouchableOpacity
               key={option.id}
               onPress={() => setOverlayMode(option.id)}
-              disabled={status === "processing" || starting}
+              disabled={busyWithAnalysis}
               style={{
                 marginTop: 12,
                 borderRadius: 18,
@@ -439,15 +486,15 @@ export default function LiveAnalysisScreen({ route }) {
             onValueChange={setTestMode}
             thumbColor="#ffffff"
             trackColor={{ false: colors.border, true: colors.primary }}
-            disabled={status === "processing" || starting || recording}
+            disabled={busyWithAnalysis || recording}
           />
         </View>
 
         <PrimaryButton
-          title={starting || status === "processing" ? "Analyzing..." : "Start Coaching Analysis"}
+          title={busyWithAnalysis ? "Working..." : "Start Coaching Analysis"}
           onPress={handleStartAnalysis}
           loading={starting}
-          disabled={!selectedVideo || status === "processing" || recording}
+          disabled={!selectedVideo || busyWithAnalysis || recording}
         />
       </View>
 
@@ -456,8 +503,46 @@ export default function LiveAnalysisScreen({ route }) {
         <Text style={[commonStyles.subtitle, { color: colors.text }]}>
           Status: {status === "idle" ? "Waiting to start" : status.replace(/_/g, " ")}
         </Text>
-        <Text style={[commonStyles.subtitle, { color: colors.text }]}>Progress: {progress}%</Text>
+        {status === "uploading" || uploadProgress > 0 ? (
+          <ProgressMeter label="Upload" value={uploadProgress} color={colors.secondary} />
+        ) : null}
+        <Text style={[commonStyles.subtitle, { color: colors.text }]}>Progress: {clampPercent(progress)}%</Text>
+        <ProgressMeter label="Analysis" value={progress} color={colors.primary} />
         <Text style={[commonStyles.subtitle, { color: colors.text }]}>Analyzed frames: {analyzedFrames}</Text>
+
+        {busyWithAnalysis ? (
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={handleCancelAnalysis}
+            style={{
+              marginTop: 14,
+              borderRadius: 999,
+              borderWidth: 1,
+              borderColor: colors.danger,
+              backgroundColor: "rgba(255, 123, 123, 0.14)",
+              paddingVertical: 12,
+              alignItems: "center",
+            }}
+          >
+            <Text style={{ color: colors.danger, fontSize: 13, fontWeight: "900" }}>Cancel Analysis</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        {(status === "error" || status === "cancelled") && selectedVideo ? (
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={handleStartAnalysis}
+            style={{
+              marginTop: 14,
+              borderRadius: 999,
+              backgroundColor: colors.primary,
+              paddingVertical: 12,
+              alignItems: "center",
+            }}
+          >
+            <Text style={{ color: "#091220", fontSize: 13, fontWeight: "900" }}>Retry Analysis</Text>
+          </TouchableOpacity>
+        ) : null}
 
         <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
           <StatCard label="Average" value={averageScore.toFixed(1)} color={colors.secondary} />
@@ -524,6 +609,37 @@ export default function LiveAnalysisScreen({ route }) {
       </View>
     </ScrollView>
   );
+}
+
+function ProgressMeter({ label, value, color }) {
+  const normalizedValue = clampPercent(value);
+  return (
+    <View style={{ marginTop: 10 }}>
+      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+        <Text style={{ color: colors.text, fontSize: 12, fontWeight: "900" }}>{label}</Text>
+        <Text style={{ color: colors.text, fontSize: 12, fontWeight: "900" }}>{normalizedValue}%</Text>
+      </View>
+      <View
+        style={{
+          height: 8,
+          borderRadius: 999,
+          backgroundColor: colors.track,
+          overflow: "hidden",
+          marginTop: 8,
+        }}
+      >
+        <View style={{ width: `${normalizedValue}%`, height: "100%", borderRadius: 999, backgroundColor: color }} />
+      </View>
+    </View>
+  );
+}
+
+function clampPercent(value) {
+  const numericValue = Number(value || 0);
+  if (!Number.isFinite(numericValue)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(Math.round(numericValue), 100));
 }
 
 function ResultVideoPlayer({ videoUrl }) {

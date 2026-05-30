@@ -2,42 +2,21 @@ import React, { useEffect, useState } from "react";
 import { Alert, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
-import { healthCheck } from "../services/api";
 import { normalizePlayerName } from "../services/supabase";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
 
 export default function ProfileMenuScreen({ navigation }) {
-  const { isGuest, playerEmail, playerName, profile, signOut, updatePlayerName } = useAuth();
-  const userPersisted = Boolean(profile?.id) && !isGuest;
+  const { isGuest, playerEmail, playerName, signOut, updatePlayerName } = useAuth();
   const [draftName, setDraftName] = useState(playerName);
   const [saving, setSaving] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState("neutral");
-  const [backendStatus, setBackendStatus] = useState("Checking...");
 
   useEffect(() => {
     setDraftName(playerName);
   }, [playerName]);
-
-  useEffect(() => {
-    let mounted = true;
-    healthCheck()
-      .then(() => {
-        if (mounted) {
-          setBackendStatus("Connected");
-        }
-      })
-      .catch(() => {
-        if (mounted) {
-          setBackendStatus("Offline");
-        }
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   async function handleSave() {
     const trimmedName = normalizePlayerName(draftName);
@@ -71,10 +50,10 @@ export default function ProfileMenuScreen({ navigation }) {
   return (
     <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
       <View style={commonStyles.heroCard}>
-        <Text style={commonStyles.eyebrow}>Settings</Text>
+        <Text style={commonStyles.eyebrow}>Profile</Text>
         <Text style={[commonStyles.title, { marginTop: 10 }]}>Account & Identity</Text>
         <Text style={commonStyles.subtitle}>
-          Manage your account details, athlete identity, and session controls from one place.
+          Manage your account details, athlete identity, and sign-in controls.
         </Text>
       </View>
 
@@ -89,20 +68,6 @@ export default function ProfileMenuScreen({ navigation }) {
             : "This is the athlete email currently linked to your SureBall account."}
         </Text>
         <Text style={[commonStyles.subtitle, { marginTop: 12, color: colors.text }]}>Player name: {playerName}</Text>
-      </View>
-
-      <View style={commonStyles.card}>
-        <Text style={commonStyles.label}>System Status</Text>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
-          <StatusPill
-            label={`Backend ${backendStatus}`}
-            color={backendStatus === "Connected" ? colors.success : backendStatus === "Offline" ? colors.danger : colors.warning}
-          />
-          <StatusPill
-            label={isGuest ? "Guest Profile" : userPersisted ? "Supabase Profile" : "Profile Pending"}
-            color={isGuest ? colors.accent : userPersisted ? colors.secondary : colors.warning}
-          />
-        </View>
       </View>
 
       <View style={commonStyles.card}>
@@ -173,7 +138,7 @@ export default function ProfileMenuScreen({ navigation }) {
             },
           ]}
         >
-          <Text style={[commonStyles.buttonText, { color: colors.text }]}>Back To Dashboard</Text>
+          <Text style={[commonStyles.buttonText, { color: colors.text }]}>Back To Camera</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -196,21 +161,5 @@ export default function ProfileMenuScreen({ navigation }) {
         </TouchableOpacity>
       </View>
     </ScrollView>
-  );
-}
-
-function StatusPill({ label, color }) {
-  return (
-    <View
-      style={[
-        commonStyles.pill,
-        {
-          backgroundColor: "rgba(7, 17, 31, 0.28)",
-          borderColor: color,
-        },
-      ]}
-    >
-      <Text style={[commonStyles.pillText, { color }]}>{label}</Text>
-    </View>
   );
 }

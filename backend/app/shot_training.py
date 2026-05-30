@@ -49,6 +49,10 @@ shot_training_jobs: Dict[str, Dict[str, object]] = {}
 shot_training_lock = threading.Lock()
 
 
+class ShotTrainingCancelled(RuntimeError):
+    pass
+
+
 def ensure_shot_training_dirs() -> None:
     SHOT_TRAINING_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     SHOT_TRAINING_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -277,6 +281,7 @@ class ShotTrainingTracker:
         self.last_make_frame = -10_000
         self.last_shot_signal_frame = -10_000
         self.last_basket_center: Optional[tuple[int, int]] = None
+        self.last_basket_radius = 0.0
         self.banner_text = "Ready to analyze."
         self.banner_until_frame = -1
         self.pending_shot_streak = 0
@@ -311,6 +316,7 @@ class ShotTrainingTracker:
         basket_detection = _best_detection(detections, "basket")
         if basket_detection:
             self.last_basket_center = _detection_center(basket_detection)
+            self.last_basket_radius = _basket_make_radius(basket_detection)
 
         shot_detection = _best_detection(detections, "player_shooting")
         if shot_detection:
@@ -331,7 +337,12 @@ class ShotTrainingTracker:
             self._start_attempt(frame_index, "Shot attempt detected")
             self.pending_shot_streak = 0
 
-        make_detection = _best_detection(detections, "ball_in_basket")
+        make_detection = _best_detection(detections, "ball_in_basket") or _infer_make_detection(
+            detections,
+            basket_detection=basket_detection,
+            last_basket_center=self.last_basket_center,
+            last_basket_radius=self.last_basket_radius,
+        )
         if make_detection and frame_index - self.last_make_frame >= self.make_cooldown_frames:
             if self.active_attempt_frame is None and self._recent_shot_signal(frame_index):
                 self._start_attempt(frame_index, "Shot attempt inferred")
@@ -447,13 +458,23 @@ class ShotTrainingJob:
             )
 
             frame_index = 0
+            player_frames = 0
+            ball_frames = 0
+            shot_signal_frames = 0
             frame = first_frame
             while frame_index < max_frames:
+                _raise_if_cancelled(self.file_id)
 
                 detections = self.detector.detect_training_objects(
                     frame,
                     confidence_overrides=SHOT_TRAINING_CONFIDENCE_OVERRIDES,
                 )
+                if _best_detection(detections, "player") or _best_detection(detections, "player_shooting"):
+                    player_frames += 1
+                if _best_detection(detections, "ball") or _best_detection(detections, "ball_in_basket"):
+                    ball_frames += 1
+                if _best_detection(detections, "player_shooting"):
+                    shot_signal_frames += 1
                 tracker.observe(detections, frame_index)
 
                 annotated = frame.copy()
@@ -482,6 +503,7 @@ class ShotTrainingJob:
                 success, next_frame = capture.read()
                 if not success or next_frame is None:
                     break
+                _raise_if_cancelled(self.file_id)
                 frame = _apply_orientation_correction(
                     next_frame,
                     orientation_degrees,
@@ -492,11 +514,21 @@ class ShotTrainingJob:
             writer.close()
             writer = None
 
+            classification = classify_score(tracker.accuracy)
+            warning = _shot_training_validity_warning(
+                processed_frames=frame_index,
+                player_frames=player_frames,
+                ball_frames=ball_frames,
+                shot_signal_frames=shot_signal_frames,
+                attempts=tracker.attempts,
+            )
             summary = (
                 f"Shot training finished with {tracker.attempts} attempts, {tracker.makes} makes, "
                 f"and {tracker.accuracy:.1f}% shooting accuracy."
             )
-            classification = classify_score(tracker.accuracy)
+            if warning:
+                summary = f"{warning} {summary}"
+                classification = "Poor"
             append_session_history(
                 {
                     "session_id": self.file_id,
@@ -519,6 +551,13 @@ class ShotTrainingJob:
                 stats=tracker.to_stats(),
                 summary=summary,
                 classification=classification,
+            )
+        except ShotTrainingCancelled:
+            _update_job(
+                self.file_id,
+                status="cancelled",
+                error_message=None,
+                summary="Shot training analysis was cancelled.",
             )
         except Exception as exc:
             _update_job(
@@ -579,6 +618,7 @@ def start_shot_training_job(
             "classification": None,
             "summary": None,
             "error_message": None,
+            "cancel_requested": False,
             "user_key": user_key,
         }
 
@@ -616,6 +656,24 @@ def get_shot_training_status(file_id: str) -> dict[str, object]:
         return job.copy()
 
 
+def cancel_shot_training_job(file_id: str) -> dict[str, object]:
+    with shot_training_lock:
+        job = shot_training_jobs.get(file_id)
+        if not job:
+            return {
+                "file_id": file_id,
+                "status": "not_found",
+            }
+        if job.get("status") in {"completed", "error", "cancelled"}:
+            return job.copy()
+        job["cancel_requested"] = True
+        job["status"] = "cancelled"
+        job["error_message"] = None
+        job["summary"] = "Shot training analysis was cancelled."
+        shot_training_jobs[file_id] = job
+        return job.copy()
+
+
 def get_shot_training_output_path(file_id: str) -> Optional[Path]:
     output_path = SHOT_TRAINING_OUTPUTS_DIR / f"{file_id}_annotated.mp4"
     if output_path.exists():
@@ -630,6 +688,13 @@ def _update_job(file_id: str, **updates: object) -> None:
         shot_training_jobs[file_id] = current
 
 
+def _raise_if_cancelled(file_id: str) -> None:
+    with shot_training_lock:
+        job = shot_training_jobs.get(file_id, {})
+        if job.get("cancel_requested") or job.get("status") == "cancelled":
+            raise ShotTrainingCancelled()
+
+
 def _best_detection(
     detections: list[Dict[str, float | str]],
     label: str,
@@ -638,6 +703,93 @@ def _best_detection(
     if not matching:
         return None
     return max(matching, key=lambda item: float(item.get("confidence", 0.0)))
+
+
+def _infer_make_detection(
+    detections: list[Dict[str, float | str]],
+    *,
+    basket_detection: Optional[Dict[str, float | str]],
+    last_basket_center: Optional[tuple[int, int]],
+    last_basket_radius: float,
+) -> Optional[Dict[str, float | str]]:
+    ball_detection = _best_detection(detections, "ball")
+    if ball_detection is None:
+        return None
+
+    if basket_detection is not None and _ball_overlaps_basket(ball_detection, basket_detection):
+        inferred = ball_detection.copy()
+        inferred["label"] = "ball_in_basket"
+        inferred["display_label"] = "Ball In Basket"
+        return inferred
+
+    if last_basket_center is not None and last_basket_radius > 0:
+        ball_center = _detection_center(ball_detection)
+        if _point_distance(ball_center, last_basket_center) <= last_basket_radius:
+            inferred = ball_detection.copy()
+            inferred["label"] = "ball_in_basket"
+            inferred["display_label"] = "Ball In Basket"
+            return inferred
+
+    return None
+
+
+def _ball_overlaps_basket(ball_detection: Dict[str, float | str], basket_detection: Dict[str, float | str]) -> bool:
+    basket_x1 = float(basket_detection["x1"])
+    basket_y1 = float(basket_detection["y1"])
+    basket_x2 = float(basket_detection["x2"])
+    basket_y2 = float(basket_detection["y2"])
+    basket_width = max(1.0, basket_x2 - basket_x1)
+    basket_height = max(1.0, basket_y2 - basket_y1)
+
+    expanded_basket = {
+        "x1": basket_x1 - basket_width * 0.35,
+        "y1": basket_y1 - basket_height * 0.45,
+        "x2": basket_x2 + basket_width * 0.35,
+        "y2": basket_y2 + basket_height * 0.75,
+    }
+    ball_center = _detection_center(ball_detection)
+    return (
+        expanded_basket["x1"] <= ball_center[0] <= expanded_basket["x2"]
+        and expanded_basket["y1"] <= ball_center[1] <= expanded_basket["y2"]
+    )
+
+
+def _basket_make_radius(basket_detection: Dict[str, float | str]) -> float:
+    width = abs(float(basket_detection["x2"]) - float(basket_detection["x1"]))
+    height = abs(float(basket_detection["y2"]) - float(basket_detection["y1"]))
+    return max(18.0, max(width, height) * 0.8)
+
+
+def _point_distance(first: tuple[int, int], second: tuple[int, int]) -> float:
+    return ((first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2) ** 0.5
+
+
+def _shot_training_validity_warning(
+    *,
+    processed_frames: int,
+    player_frames: int,
+    ball_frames: int,
+    shot_signal_frames: int,
+    attempts: int,
+) -> Optional[str]:
+    if processed_frames <= 0:
+        return "No usable video frames were found."
+
+    player_ratio = player_frames / processed_frames
+    ball_ratio = ball_frames / processed_frames
+    shot_signal_ratio = shot_signal_frames / processed_frames
+
+    if player_ratio < 0.05 and ball_ratio < 0.05:
+        return "No valid shooting action detected. Make sure a player and basketball are visible."
+    if player_ratio < 0.05:
+        return "No player detected. Make sure the shooter is fully visible."
+    if ball_ratio < 0.05:
+        return "No basketball detected. Keep the ball visible through the shot."
+    if attempts <= 0 and shot_signal_ratio < 0.05:
+        return "No shot attempt detected. Upload a clip where the player actually shoots the ball."
+    if attempts <= 0:
+        return "No completed shot attempt was counted. Keep the shooter, ball, and rim visible."
+    return None
 
 
 def _detection_center(detection: Dict[str, float | str]) -> tuple[int, int]:

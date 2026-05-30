@@ -10,8 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .ball_detector import BallDetector
+from .clip_validity import apply_coaching_clip_validity, merge_validity_warnings
 from .coaching_analysis import run_coaching_analysis
 from .coaching_video import (
+    CoachingActionCounter,
+    cancel_coaching_video_job,
     ensure_coaching_video_dirs,
     get_coaching_video_output_path,
     get_coaching_video_status,
@@ -20,7 +23,6 @@ from .coaching_video import (
 from .feedback_engine import extract_features, generate_feedback
 from .one_euro import LandmarkSmoother
 from .pose_estimator import PoseEstimator
-from .scoring import calculate_score, classify_score
 from .schemas import (
     CoachingVideoStartResponse,
     CoachingVideoStatusResponse,
@@ -33,6 +35,7 @@ from .schemas import (
     VideoAnalysisResponse,
 )
 from .shot_training import (
+    cancel_shot_training_job,
     ensure_shot_training_dirs,
     get_shot_training_output_path,
     get_shot_training_status,
@@ -72,21 +75,21 @@ ball_detector = BallDetector()
 MODE_LIBRARY = [
     ModeInfo(
         id="shooting_form",
-        title="Shooting Form",
+        title="Shooting",
         description="Analyze shot mechanics, release structure, and ball control.",
         target_focus=["elbow alignment", "knee bend", "ball release", "balance"],
     ),
     ModeInfo(
-        id="defensive_stance",
-        title="Defensive Stance",
-        description="Evaluate low stance readiness and defensive body position.",
-        target_focus=["stance width", "knee bend", "torso readiness", "symmetry"],
+        id="dribbling",
+        title="Dribbling",
+        description="Analyze ball control, low handle position, body balance, and athletic stance.",
+        target_focus=["ball control", "low handle", "knee bend", "balance"],
     ),
     ModeInfo(
-        id="basic_footwork",
-        title="Basic Footwork",
-        description="Assess posture and base stability during movement drills.",
-        target_focus=["feet spacing", "torso control", "athletic base", "balance"],
+        id="passing",
+        title="Passing",
+        description="Evaluate pass setup, hand-to-ball connection, release line, and balance.",
+        target_focus=["ball control", "release line", "torso control", "balance"],
     ),
 ]
 
@@ -197,6 +200,12 @@ def get_coaching_video_job_status(file_id: str) -> CoachingVideoStatusResponse:
     return CoachingVideoStatusResponse(**job)
 
 
+@app.post("/coaching-video/cancel/{file_id}", response_model=CoachingVideoStatusResponse)
+def cancel_coaching_video_job_status(file_id: str) -> CoachingVideoStatusResponse:
+    job = cancel_coaching_video_job(file_id)
+    return CoachingVideoStatusResponse(**job)
+
+
 @app.get("/coaching-video/download/{file_id}")
 def download_coaching_video_result(file_id: str) -> FileResponse:
     output_path = get_coaching_video_output_path(file_id)
@@ -212,6 +221,12 @@ def download_coaching_video_result(file_id: str) -> FileResponse:
 @app.get("/shooting-training/status/{file_id}", response_model=ShotTrainingStatusResponse)
 def get_shooting_training_status(file_id: str) -> ShotTrainingStatusResponse:
     job = get_shot_training_status(file_id)
+    return ShotTrainingStatusResponse(**job)
+
+
+@app.post("/shooting-training/cancel/{file_id}", response_model=ShotTrainingStatusResponse)
+def cancel_shooting_training_status(file_id: str) -> ShotTrainingStatusResponse:
+    job = cancel_shot_training_job(file_id)
     return ShotTrainingStatusResponse(**job)
 
 
@@ -287,8 +302,9 @@ async def analyze_video(
     session_id = new_session_id()
     frame_index = 0
     processed_frames = 0
-    sampled_results: List[FrameAnalysisResponse] = []
     fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+    sampled_results: List[FrameAnalysisResponse] = []
+    action_counter = CoachingActionCounter(mode, fps=fps)
     landmark_smoother = LandmarkSmoother(min_cutoff=1.2, beta=0.03, derivative_cutoff=1.0)
 
     try:
@@ -298,18 +314,18 @@ async def analyze_video(
                 break
             processed_frames += 1
             if frame_index % max(sample_stride, 1) == 0:
-                sampled_results.append(
-                    run_coaching_analysis(
-                        frame,
-                        mode=mode,
-                        session_id=session_id,
-                        frame_index=frame_index,
-                        pose_estimator=pose_estimator,
-                        ball_detector=ball_detector,
-                        landmark_smoother=landmark_smoother,
-                        timestamp_seconds=frame_index / max(fps, 1.0),
-                    )["response"]
-                )
+                result = run_coaching_analysis(
+                    frame,
+                    mode=mode,
+                    session_id=session_id,
+                    frame_index=frame_index,
+                    pose_estimator=pose_estimator,
+                    ball_detector=ball_detector,
+                    landmark_smoother=landmark_smoother,
+                    timestamp_seconds=frame_index / max(fps, 1.0),
+                )["response"]
+                action_counter.observe(result)
+                sampled_results.append(result)
             frame_index += 1
     finally:
         capture.release()
@@ -322,7 +338,16 @@ async def analyze_video(
     best_score = max(item.score.score for item in sampled_results)
     worst_score = min(item.score.score for item in sampled_results)
     cue_frequency: dict[str, int] = {}
+    pose_frames = 0
+    ball_frames = 0
+    shooting_evidence_frames = 0
     for item in sampled_results:
+        if item.pose_detected:
+            pose_frames += 1
+        if item.ball_detected:
+            ball_frames += 1
+        if mode == "shooting_form" and _has_shooting_evidence(item):
+            shooting_evidence_frames += 1
         for cue in item.feedback:
             if cue.code == "solid_form":
                 continue
@@ -334,7 +359,23 @@ async def analyze_video(
     if not dominant_feedback:
         dominant_feedback = ["Strong overall movement quality detected."]
 
-    classification = classify_score(average_score)
+    validity = apply_coaching_clip_validity(
+        mode=mode,
+        average_score=average_score,
+        best_score=best_score,
+        worst_score=worst_score,
+        analyzed_frames=len(sampled_results),
+        pose_frames=pose_frames,
+        ball_frames=ball_frames,
+        action_label=action_counter.action_label,
+        action_count=action_counter.count,
+        shooting_evidence_frames=shooting_evidence_frames,
+    )
+    average_score = validity.average_score
+    best_score = validity.best_score
+    worst_score = validity.worst_score
+    dominant_feedback = merge_validity_warnings(validity.warnings, dominant_feedback)
+    classification = validity.classification
     session_summary = (
         f"{mode.replace('_', ' ').title()} session completed with an average score of "
         f"{average_score:.1f}. Focus areas: {', '.join(dominant_feedback)}"
@@ -365,6 +406,16 @@ async def analyze_video(
         user_key=user_key,
     )
     return response
+
+
+def _has_shooting_evidence(result: FrameAnalysisResponse) -> bool:
+    if not result.pose_detected or not result.ball_detected:
+        return False
+    features = result.features
+    near_hand = features.ball_to_wrist_distance is not None and features.ball_to_wrist_distance <= 0.8
+    in_shooting_zone = features.ball_vertical_zone in {"torso", "high"}
+    near_release_height = features.ball_release_position is not None and features.ball_release_position >= -0.05
+    return near_hand and (in_shooting_zone or near_release_height)
 
 
 def _save_session_record(

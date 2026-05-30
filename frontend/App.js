@@ -7,12 +7,12 @@ import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import LoginScreen from "./src/screens/LoginScreen";
 import DashboardScreen from "./src/screens/DashboardScreen";
-import CoachingModeScreen from "./src/screens/CoachingModeScreen";
 import LiveAnalysisScreen from "./src/screens/LiveAnalysisScreen";
 import SessionHistoryScreen from "./src/screens/SessionHistoryScreen";
 import ShootingTrainingScreen from "./src/screens/ShootingTrainingScreen";
 import UnifiedCoachingSessionScreen from "./src/screens/UnifiedCoachingSessionScreen";
 import ProfileMenuScreen from "./src/screens/ProfileMenuScreen";
+import SettingsScreen from "./src/screens/SettingsScreen";
 import ChangePasswordScreen from "./src/screens/ChangePasswordScreen";
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
 import { colors } from "./src/theme/colors";
@@ -72,7 +72,7 @@ function AppNavigator() {
     <NavigationContainer theme={navTheme}>
       <StatusBar style="light" />
       <Stack.Navigator
-        initialRouteName="Login"
+        initialRouteName={isAuthenticated ? "CoachingModes" : "Login"}
         screenOptions={{
           headerStyle: { backgroundColor: colors.cardElevated },
           headerTintColor: colors.text,
@@ -84,20 +84,25 @@ function AppNavigator() {
         {isAuthenticated ? (
           <>
             <Stack.Screen
+              name="CoachingModes"
+              component={UnifiedCoachingSessionScreen}
+              options={{ headerShown: false }}
+            />
+            <Stack.Screen
               name="Dashboard"
               component={DashboardScreen}
               options={({ navigation }) => ({
                 title: "SureBall Dashboard",
-                headerRight: () => <HeaderAction onPress={() => navigation.navigate("PlayerMenu")} />,
+                headerRight: () => <HeaderAction onPress={() => navigation.navigate("Settings")} />,
               })}
             />
-            <Stack.Screen name="PlayerMenu" component={ProfileMenuScreen} options={{ title: "Settings" }} />
+            <Stack.Screen name="PlayerMenu" component={ProfileMenuScreen} options={{ title: "Profile" }} />
+            <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: "Settings" }} />
             <Stack.Screen
               name="UnifiedCoachingSession"
               component={UnifiedCoachingSessionScreen}
-              options={{ title: "Unified Coaching Session" }}
+              options={{ headerShown: false }}
             />
-            <Stack.Screen name="CoachingModes" component={CoachingModeScreen} options={{ title: "Select Coaching Mode" }} />
             <Stack.Screen name="LiveAnalysis" component={LiveAnalysisScreen} options={{ title: "Coaching Video Analysis" }} />
             <Stack.Screen
               name="ShootingTraining"
