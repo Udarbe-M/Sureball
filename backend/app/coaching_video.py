@@ -183,6 +183,7 @@ class CoachingVideoJob:
                 action_count=0,
                 action_label=_action_label_for_mode(self.mode),
                 shooting_stats={},
+                shot_events=[],
                 dominant_feedback=[],
                 classification=None,
                 summary=None,
@@ -291,6 +292,7 @@ class CoachingVideoJob:
                         action_count=_display_action_count(action_counter, shot_tracker),
                         action_label=_display_action_label(action_counter, shot_tracker),
                         shooting_stats=_shooting_stats(shot_tracker),
+                        shot_events=_shot_events(shot_tracker),
                         dominant_feedback=dominant_feedback,
                     )
 
@@ -310,6 +312,8 @@ class CoachingVideoJob:
 
             writer.close()
             writer = None
+            if shot_tracker is not None:
+                shot_tracker.finalize_pending_attempt(frame_index)
 
             average_score = round(score_total / max(analyzed_frames, 1), 2)
             dominant_feedback = [
@@ -361,6 +365,7 @@ class CoachingVideoJob:
                     "action_count": _display_action_count(action_counter, shot_tracker),
                     "action_label": _display_action_label(action_counter, shot_tracker),
                     "shooting_stats": _shooting_stats(shot_tracker),
+                    "shot_events": _shot_events(shot_tracker),
                     "source_type": "video",
                     "user_key": self.user_key,
                 }
@@ -383,6 +388,7 @@ class CoachingVideoJob:
                 action_count=_display_action_count(action_counter, shot_tracker),
                 action_label=_display_action_label(action_counter, shot_tracker),
                 shooting_stats=_shooting_stats(shot_tracker),
+                shot_events=_shot_events(shot_tracker),
                 dominant_feedback=dominant_feedback,
                 classification=classification,
                 summary=summary,
@@ -418,12 +424,14 @@ class CoachingVideoJob:
             _draw_shooting_detection_boxes(frame, shot_detections)
 
         if self.overlay_mode in {"full_overlay", "focus_feedback"}:
+            primary_label = _simple_feedback_label(self.mode, response)
+            secondary_label = _simple_summary_label(self.mode, response, action_counter, shot_tracker)
             overlay = frame.copy()
             cv2.rectangle(overlay, (18, 18), (frame.shape[1] - 18, 92), (10, 16, 28), -1)
             cv2.addWeighted(overlay, 0.58, frame, 0.42, 0, frame)
             cv2.putText(
                 frame,
-                response.feedback[0].message,
+                primary_label,
                 (34, 58),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.75,
@@ -433,7 +441,7 @@ class CoachingVideoJob:
             )
             cv2.putText(
                 frame,
-                response.coaching_summary,
+                secondary_label,
                 (34, 82),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.42,
@@ -539,6 +547,7 @@ def start_coaching_video_job(
             "action_count": 0,
             "action_label": _action_label_for_mode(mode),
             "shooting_stats": {},
+            "shot_events": [],
             "dominant_feedback": [],
             "classification": None,
             "summary": None,
@@ -588,6 +597,7 @@ def get_coaching_video_status(file_id: str) -> dict[str, object]:
                 "action_count": 0,
                 "action_label": None,
                 "shooting_stats": {},
+                "shot_events": [],
                 "dominant_feedback": [],
                 "classification": None,
                 "summary": None,
@@ -668,6 +678,12 @@ def _shooting_stats(shot_tracker: Optional[ShotTrainingTracker]) -> dict[str, fl
     return shot_tracker.to_stats()
 
 
+def _shot_events(shot_tracker: Optional[ShotTrainingTracker]) -> list[dict[str, object]]:
+    if shot_tracker is None:
+        return []
+    return shot_tracker.to_shot_events()
+
+
 def _percent(part: int, total: int) -> float:
     if total <= 0:
         return 0.0
@@ -681,6 +697,100 @@ def _format_count_summary(action_label: Optional[str], count: int, *, shot_track
         return ""
     label = action_label.lower()
     return f" {count} {label} counted."
+
+
+def _simple_feedback_label(mode: str, response: Any) -> str:
+    if not bool(getattr(response, "pose_detected", False)):
+        return "Step fully into frame"
+    if not bool(getattr(response, "ball_detected", False)):
+        return "Keep the ball visible"
+
+    feedback_text = _first_feedback_text(response)
+    normalized = feedback_text.lower()
+    score = _response_score_value(response)
+    features = getattr(response, "features", None)
+
+    if mode == "dribbling":
+        ball_zone = _feature_value(features, "ball_vertical_zone")
+        hand_distance = _feature_float(features, "ball_to_wrist_distance")
+        if ball_zone == "high" or "high" in normalized:
+            return "Keep dribble below hip"
+        if hand_distance is not None and hand_distance > 1.1:
+            return "Keep ball close to hand"
+        if "balance" in normalized:
+            return "Stay low and balanced"
+        return "Good low control" if score >= 75 else "Control each bounce"
+
+    if mode == "passing":
+        hand_distance = _feature_float(features, "ball_to_wrist_distance")
+        if hand_distance is not None and hand_distance > 1.0:
+            return "Finish hands to target"
+        if "balance" in normalized:
+            return "Hold balance after pass"
+        if "release" in normalized or "target" in normalized:
+            return "Aim release at target"
+        return "Clean pass release" if score >= 75 else "Connect ball to hands"
+
+    if "setup" in normalized:
+        return "Show clear shot setup"
+    if "elbow" in normalized:
+        return "Align elbow under ball"
+    if "balance" in normalized or "landing" in normalized:
+        return "Land balanced"
+    if "follow" in normalized:
+        return "Hold follow-through"
+    return "Good shooting rhythm" if score >= 75 else "Track setup and release"
+
+
+def _simple_summary_label(
+    mode: str,
+    response: Any,
+    action_counter: CoachingActionCounter,
+    shot_tracker: Optional[ShotTrainingTracker],
+) -> str:
+    if shot_tracker is not None:
+        return _short_overlay_text(
+            f"Shots {shot_tracker.attempts} | Makes {shot_tracker.makes} | Misses {shot_tracker.misses}"
+        )
+
+    action_label = action_counter.action_label
+    if action_label:
+        return _short_overlay_text(f"{action_label}: {action_counter.count} | Replay the best reps")
+
+    summary = str(getattr(response, "coaching_summary", "") or "")
+    if summary:
+        return _short_overlay_text(summary)
+
+    if mode == "dribbling":
+        return "Watch hand, bounce, and stance"
+    if mode == "passing":
+        return "Watch release, target, and balance"
+    return "Watch setup, release, and follow-through"
+
+
+def _first_feedback_text(response: Any) -> str:
+    feedback = getattr(response, "feedback", None) or []
+    if not feedback:
+        return ""
+    cue = feedback[0]
+    parts = [str(getattr(cue, "code", "") or ""), str(getattr(cue, "message", "") or "")]
+    return " ".join(part for part in parts if part)
+
+
+def _response_score_value(response: Any) -> float:
+    score = getattr(response, "score", None)
+    value = getattr(score, "score", 0)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _short_overlay_text(text: str, max_length: int = 76) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max_length - 3].rstrip() + "..."
 
 
 def _draw_shooting_count_panel(frame: np.ndarray, tracker: ShotTrainingTracker) -> None:

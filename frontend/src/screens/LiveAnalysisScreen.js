@@ -106,6 +106,10 @@ export default function LiveAnalysisScreen({ route }) {
               mode: mode.id,
               modeLabel: mode.title,
               score: result.average_score || 0,
+              actionCount: result.action_count || 0,
+              actionLabel: result.action_label || "",
+              shootingStats: result.shooting_stats || null,
+              shotEvents: result.shot_events || [],
               classification: result.classification || "Needs Improvement",
               detectedErrors: (result.dominant_feedback || []).map((message) => ({
                 issue: message,
