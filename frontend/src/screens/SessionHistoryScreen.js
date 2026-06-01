@@ -11,7 +11,12 @@ import {
   fetchSessionsFromBackend,
 } from "../services/api";
 import { hapticSelection, hapticSuccess, hapticWarning } from "../services/haptics";
-import { deleteLocalSessionRecord, getLocalSessionHistory } from "../services/storage";
+import {
+  deleteLocalSessionRecord,
+  getLocalSessionHistory,
+  saveAnnotatedVideoLocally,
+  saveSessionRecord,
+} from "../services/storage";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
 import { humanizeMode } from "../utils/helpers";
@@ -21,6 +26,9 @@ function mergeHistory(localSessions, backendSessions) {
   const normalizedLocal = localSessions.map((item) => ({
     ...item,
     sourceKey: item.id || `${item.mode}-${item.timestamp}`,
+    remoteVideoUrl: item.remoteVideoUrl || buildRemoteVideoUrl(item.mode, item.id, item.sourceType),
+    shootingStats: item.shootingStats || item.shooting_stats || null,
+    shotEvents: normalizeShotEvents(item.shotEvents || item.shot_events),
   }));
   const normalizedBackend = backendSessions.map((item) => ({
     id: item.session_id,
@@ -36,13 +44,27 @@ function mergeHistory(localSessions, backendSessions) {
     summary: item.summary,
     sourceKey: item.session_id,
     remoteVideoUrl: buildRemoteVideoUrl(item.mode, item.session_id, item.source_type),
+    shootingStats: item.shooting_stats || null,
+    shotEvents: normalizeShotEvents(item.shot_events),
   }));
   const full = [...normalizedLocal, ...normalizedBackend];
   const seen = new Set();
   const deduped = [];
   for (const entry of full) {
     const key = entry.id || `${entry.mode}-${entry.timestamp}`;
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      const existing = deduped.find((item) => (item.id || `${item.mode}-${item.timestamp}`) === key);
+      if (existing) {
+        existing.remoteVideoUrl = existing.remoteVideoUrl || entry.remoteVideoUrl;
+        existing.shootingStats = existing.shootingStats || entry.shootingStats;
+        existing.actionCount = existing.actionCount || entry.actionCount;
+        existing.actionLabel = existing.actionLabel || entry.actionLabel;
+        if ((!existing.shotEvents || existing.shotEvents.length === 0) && entry.shotEvents?.length) {
+          existing.shotEvents = entry.shotEvents;
+        }
+      }
+      continue;
+    }
     seen.add(key);
     deduped.push(entry);
   }
@@ -53,13 +75,147 @@ function buildRemoteVideoUrl(mode, sessionId, sourceType = null) {
   if (!sessionId) {
     return null;
   }
-  if (sourceType === "shot_training_video" || mode === "shooting_training") {
+  if (sourceType === "shot_training_video" || mode === "shot_training" || mode === "shooting_training") {
     return buildShootingTrainingDownloadUrl(sessionId);
   }
-  if (sourceType === "video" && ["shooting_form", "dribbling", "passing"].includes(mode)) {
+  if ((sourceType === "video" || sourceType == null) && ["shooting_form", "dribbling", "passing"].includes(mode)) {
     return buildCoachingVideoDownloadUrl(sessionId);
   }
   return null;
+}
+
+function normalizeShotEvents(events) {
+  if (!Array.isArray(events)) {
+    return [];
+  }
+  return events
+    .map((event, index) => {
+      const source = event || {};
+      const timestampSeconds = numericOrNull(source.timestampSeconds ?? source.timestamp_seconds);
+      const resultTimestampSeconds = numericOrNull(source.resultTimestampSeconds ?? source.result_timestamp_seconds);
+      const reviewStartSeconds = timestampSeconds ?? resultTimestampSeconds ?? 0;
+      return {
+        shotNumber: Number(source.shotNumber ?? source.shot_number ?? index + 1) || index + 1,
+        result: String(source.result || "pending").toLowerCase(),
+        timestampSeconds: reviewStartSeconds,
+        resultTimestampSeconds,
+        reviewSeconds: Math.max(0, reviewStartSeconds - 1),
+        startFrame: Number(source.startFrame ?? source.start_frame ?? 0) || 0,
+        resultFrame: Number(source.resultFrame ?? source.result_frame ?? 0) || null,
+      };
+    })
+    .sort((a, b) => a.shotNumber - b.shotNumber);
+}
+
+function numericOrNull(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function formatShotTime(seconds) {
+  const safeSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainder = String(safeSeconds % 60).padStart(2, "0");
+  return `${minutes}:${remainder}`;
+}
+
+function formatShotResult(result) {
+  if (result === "make") return "Make";
+  if (result === "miss") return "Miss";
+  return "Review";
+}
+
+function shotResultColor(result) {
+  if (result === "make") return colors.success;
+  if (result === "miss") return colors.warning;
+  return colors.secondary;
+}
+
+function scoreForTrend(item) {
+  if (item.mode === "shooting_form" && item.shootingStats?.attempts) {
+    return Number(item.shootingStats.accuracy || 0);
+  }
+  if (item.score === null || item.score === undefined || item.score === "") {
+    return Number.NaN;
+  }
+  return Number(item.score);
+}
+
+function countForTrend(item) {
+  if (item.mode === "shooting_form" && item.shootingStats?.attempts) {
+    return {
+      label: "Shots",
+      value: `${item.shootingStats.makes || 0}/${item.shootingStats.attempts || 0}`,
+    };
+  }
+  if (item.actionLabel) {
+    return {
+      label: item.actionLabel,
+      value: item.actionCount || 0,
+    };
+  }
+  return null;
+}
+
+function buildProgressTrends(history) {
+  const byMode = new Map();
+  history.forEach((item) => {
+    if (!item.mode) {
+      return;
+    }
+    const score = scoreForTrend(item);
+    if (!Number.isFinite(score)) {
+      return;
+    }
+    const sessions = byMode.get(item.mode) || [];
+    sessions.push({ item, score });
+    byMode.set(item.mode, sessions);
+  });
+
+  return Array.from(byMode.entries())
+    .map(([mode, sessions]) => {
+      const sorted = sessions.sort(
+        (a, b) => new Date(b.item.timestamp).getTime() - new Date(a.item.timestamp).getTime()
+      );
+      const latest = sorted[0];
+      const previous = sorted[1];
+      const delta = previous ? latest.score - previous.score : null;
+      return {
+        mode,
+        label: humanizeMode(mode),
+        metricLabel: mode === "shooting_form" ? "Accuracy" : "Score",
+        latestScore: latest.score,
+        delta,
+        sessionCount: sorted.length,
+        action: countForTrend(latest.item),
+      };
+    })
+    .filter((trend) => trend.sessionCount > 0)
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function buildArchivedReviewEvents(item) {
+  if (item.shotEvents?.length) {
+    return item.shotEvents;
+  }
+  if (item.mode === "dribbling") {
+    return [
+      { label: "Start Stance", result: "review", timestampSeconds: 0, reviewSeconds: 0 },
+      { label: "Control Check", result: "review", timestampSeconds: 5, reviewSeconds: 5 },
+      { label: "Finish Rhythm", result: "review", timestampSeconds: 10, reviewSeconds: 10 },
+    ];
+  }
+  if (item.mode === "passing") {
+    return [
+      { label: "Load", result: "review", timestampSeconds: 0, reviewSeconds: 0 },
+      { label: "Release Line", result: "review", timestampSeconds: 5, reviewSeconds: 5 },
+      { label: "Balance Finish", result: "review", timestampSeconds: 10, reviewSeconds: 10 },
+    ];
+  }
+  return [];
 }
 
 export default function SessionHistoryScreen() {
@@ -68,6 +224,7 @@ export default function SessionHistoryScreen() {
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState([]);
   const [deletingKey, setDeletingKey] = useState(null);
+  const [downloadingKey, setDownloadingKey] = useState(null);
   const [previewKey, setPreviewKey] = useState(null);
   const [selectedFilter, setSelectedFilter] = useState("all");
 
@@ -89,6 +246,7 @@ export default function SessionHistoryScreen() {
     }
     return history.filter((item) => item.mode === selectedFilter);
   }, [history, selectedFilter]);
+  const modeTrends = useMemo(() => buildProgressTrends(history), [history]);
 
   const loadHistory = useCallback(async () => {
     setLoading(true);
@@ -157,6 +315,41 @@ export default function SessionHistoryScreen() {
     }
   }
 
+  async function downloadSessionVideo(item) {
+    const recordKey = item.sourceKey || item.id || `${item.mode}-${item.timestamp}`;
+    const remoteVideoUrl = item.remoteVideoUrl || buildRemoteVideoUrl(item.mode, item.id, item.sourceType);
+    if (!remoteVideoUrl) {
+      Alert.alert("Video unavailable", "This archived session does not have a downloadable backend video.");
+      return;
+    }
+
+    setDownloadingKey(recordKey);
+    try {
+      const localVideoUri = await saveAnnotatedVideoLocally({
+        remoteUrl: remoteVideoUrl,
+        sessionId: item.id,
+        mode: item.mode,
+        timestamp: item.timestamp,
+        suffix: "archive",
+      });
+      await saveSessionRecord(userKey, {
+        ...item,
+        id: item.id,
+        sourceKey: recordKey,
+        remoteVideoUrl,
+        localVideoUri,
+      });
+      hapticSuccess();
+      Alert.alert("Video downloaded", "This session video is now saved for offline playback in Session History.");
+      await loadHistory();
+    } catch (error) {
+      hapticWarning();
+      Alert.alert("Download failed", String(error.message || error));
+    } finally {
+      setDownloadingKey(null);
+    }
+  }
+
   function handleFilterChange(filterId) {
     hapticSelection();
     setSelectedFilter(filterId);
@@ -207,6 +400,56 @@ export default function SessionHistoryScreen() {
         </View>
       ) : null}
 
+      {modeTrends.length > 0 ? (
+        <View style={commonStyles.card}>
+          <Text style={commonStyles.label}>Progress Trends</Text>
+          <View style={{ marginTop: 14, gap: 10 }}>
+            {modeTrends.map((trend) => {
+              const deltaColor =
+                trend.delta === null ? colors.muted : trend.delta >= 0 ? colors.success : colors.warning;
+              const deltaLabel =
+                trend.delta === null
+                  ? "No comparison yet"
+                  : `${trend.delta >= 0 ? "+" : ""}${trend.delta.toFixed(1)} from last`;
+              return (
+                <View
+                  key={trend.mode}
+                  style={{
+                    borderRadius: 16,
+                    borderWidth: 1,
+                    borderColor: colors.border,
+                    backgroundColor: colors.backgroundSoft,
+                    padding: 13,
+                  }}
+                >
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: colors.text, fontSize: 14, fontWeight: "900" }}>{trend.label}</Text>
+                      <Text style={{ marginTop: 4, color: colors.muted, fontSize: 11, fontWeight: "800" }}>
+                        {trend.sessionCount} session{trend.sessionCount === 1 ? "" : "s"}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Text style={{ color: colors.muted, fontSize: 10, fontWeight: "900", textTransform: "uppercase" }}>
+                        {trend.metricLabel}
+                      </Text>
+                      <Text style={{ marginTop: 3, color: colors.primary, fontSize: 20, fontWeight: "900" }}>
+                        {trend.latestScore.toFixed(1)}
+                        {trend.metricLabel === "Accuracy" ? "%" : ""}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                    <InfoPill label={deltaLabel} color={deltaColor} />
+                    {trend.action ? <InfoPill label={`${trend.action.label}: ${trend.action.value}`} color={colors.accent} /> : null}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        </View>
+      ) : null}
+
       {history.length === 0 ? (
         <View style={commonStyles.card}>
           <Text style={commonStyles.sectionTitle}>No Sessions Yet</Text>
@@ -248,10 +491,10 @@ export default function SessionHistoryScreen() {
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
               <Text style={commonStyles.label}>Detected Errors</Text>
               <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", gap: 8, flex: 1 }}>
-                {item.localVideoUri ? (
+                {item.localVideoUri || item.remoteVideoUrl ? (
                   <TouchableOpacity
                     activeOpacity={0.85}
-                    disabled={deletingKey === item.sourceKey}
+                    disabled={deletingKey === item.sourceKey || downloadingKey === item.sourceKey}
                     onPress={() => {
                       hapticSelection();
                       setPreviewKey((current) => (current === item.sourceKey ? null : item.sourceKey));
@@ -263,7 +506,7 @@ export default function SessionHistoryScreen() {
                       borderWidth: 1,
                       borderColor: colors.secondary,
                       backgroundColor: "rgba(110, 203, 255, 0.12)",
-                      opacity: deletingKey === item.sourceKey ? 0.65 : 1,
+                      opacity: deletingKey === item.sourceKey || downloadingKey === item.sourceKey ? 0.65 : 1,
                       flexShrink: 1,
                     }}
                   >
@@ -275,10 +518,34 @@ export default function SessionHistoryScreen() {
                     </Text>
                   </TouchableOpacity>
                 ) : null}
+                {!item.localVideoUri && item.remoteVideoUrl ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    disabled={deletingKey === item.sourceKey || downloadingKey === item.sourceKey}
+                    onPress={() => downloadSessionVideo(item)}
+                    style={{
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      borderRadius: 999,
+                      borderWidth: 1,
+                      borderColor: colors.success,
+                      backgroundColor: "rgba(74, 222, 128, 0.12)",
+                      opacity: deletingKey === item.sourceKey || downloadingKey === item.sourceKey ? 0.65 : 1,
+                      flexShrink: 1,
+                    }}
+                  >
+                    <Text
+                      style={{ color: colors.success, fontSize: 11, fontWeight: "800", letterSpacing: 0.6 }}
+                      numberOfLines={1}
+                    >
+                      {downloadingKey === item.sourceKey ? "DOWNLOADING..." : "DOWNLOAD VIDEO"}
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
                 {item.localVideoUri || item.remoteVideoUrl ? (
                   <TouchableOpacity
                     activeOpacity={0.85}
-                    disabled={deletingKey === item.sourceKey}
+                    disabled={deletingKey === item.sourceKey || downloadingKey === item.sourceKey}
                     onPress={() => openSessionVideo(item)}
                     style={{
                       paddingHorizontal: 12,
@@ -287,7 +554,7 @@ export default function SessionHistoryScreen() {
                       borderWidth: 1,
                       borderColor: colors.primary,
                       backgroundColor: "rgba(255, 122, 26, 0.12)",
-                      opacity: deletingKey === item.sourceKey ? 0.65 : 1,
+                      opacity: deletingKey === item.sourceKey || downloadingKey === item.sourceKey ? 0.65 : 1,
                       flexShrink: 1,
                     }}
                   >
@@ -301,7 +568,7 @@ export default function SessionHistoryScreen() {
                 ) : null}
                 <TouchableOpacity
                   activeOpacity={0.85}
-                  disabled={deletingKey === item.sourceKey}
+                  disabled={deletingKey === item.sourceKey || downloadingKey === item.sourceKey}
                   onPress={() => confirmDelete(item)}
                   style={{
                     paddingHorizontal: 12,
@@ -310,7 +577,7 @@ export default function SessionHistoryScreen() {
                     borderWidth: 1,
                     borderColor: colors.danger,
                     backgroundColor: "rgba(255, 123, 123, 0.12)",
-                    opacity: deletingKey === item.sourceKey ? 0.65 : 1,
+                    opacity: deletingKey === item.sourceKey || downloadingKey === item.sourceKey ? 0.65 : 1,
                     flexShrink: 1,
                   }}
                 >
@@ -333,7 +600,7 @@ export default function SessionHistoryScreen() {
               ))
             )}
 
-            {previewKey === item.sourceKey && item.localVideoUri ? (
+            {previewKey === item.sourceKey && (item.localVideoUri || item.remoteVideoUrl) ? (
               <>
                 <View
                   style={{
@@ -345,10 +612,15 @@ export default function SessionHistoryScreen() {
                     backgroundColor: "#040b15",
                   }}
                 >
-                  <ArchivedVideoPlayer videoUrl={item.localVideoUri} />
+                  <ArchivedVideoPlayer
+                    videoUrl={item.localVideoUri || item.remoteVideoUrl}
+                    reviewEvents={buildArchivedReviewEvents(item)}
+                  />
                 </View>
                 <Text style={[commonStyles.subtitle, { marginTop: 10, fontSize: 12 }]}>
-                  This annotated session video is stored locally on this phone and can be replayed offline.
+                  {item.localVideoUri
+                    ? "This annotated session video is stored locally on this phone and can be replayed offline."
+                    : "This annotated session video is streaming from the backend. Download it to keep an offline copy."}
                 </Text>
               </>
             ) : null}
@@ -399,7 +671,7 @@ function classificationColor(classification) {
   return colors.text;
 }
 
-function ArchivedVideoPlayer({ videoUrl }) {
+function ArchivedVideoPlayer({ videoUrl, reviewEvents = [] }) {
   const player = useVideoPlayer(
     {
       uri: videoUrl,
@@ -410,6 +682,13 @@ function ArchivedVideoPlayer({ videoUrl }) {
     }
   );
   const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
+  const videoMoments = Array.isArray(reviewEvents) ? reviewEvents : [];
+
+  function jumpToMoment(event) {
+    hapticSelection();
+    player.currentTime = Number(event.reviewSeconds || 0);
+    player.play();
+  }
 
   return (
     <View>
@@ -441,9 +720,44 @@ function ArchivedVideoPlayer({ videoUrl }) {
           }}
         >
           <Text style={{ color: colors.primary, fontSize: 14, fontWeight: "800" }}>
-            {isPlaying ? "Pause Saved Video" : "Play Saved Video"}
+            {isPlaying ? "Pause Video" : "Play Video"}
           </Text>
         </TouchableOpacity>
+        {videoMoments.length > 0 ? (
+          <View style={{ marginTop: 14, paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
+            <Text style={[commonStyles.label, { marginBottom: 10 }]}>Review Moments</Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
+              {videoMoments.map((event, index) => {
+                const resultColor = shotResultColor(event.result);
+                const resultTime = event.resultTimestampSeconds ?? event.timestampSeconds;
+                const momentLabel = event.label || `Shot ${event.shotNumber || index + 1}`;
+                return (
+                  <TouchableOpacity
+                    key={`${momentLabel}-${event.timestampSeconds ?? index}`}
+                    activeOpacity={0.85}
+                    onPress={() => jumpToMoment(event)}
+                    style={{
+                      borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: resultColor,
+                      backgroundColor: "rgba(7, 17, 31, 0.36)",
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                      minWidth: 104,
+                    }}
+                  >
+                    <Text style={{ color: colors.text, fontSize: 12, fontWeight: "900" }}>
+                      {momentLabel}
+                    </Text>
+                    <Text style={{ color: resultColor, fontSize: 11, fontWeight: "800", marginTop: 3 }}>
+                      {formatShotResult(event.result)} at {formatShotTime(resultTime)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
       </View>
     </View>
   );

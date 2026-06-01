@@ -9,7 +9,12 @@ import numpy as np
 from .feedback_engine import extract_features, generate_feedback
 from .scoring import calculate_score
 from .schemas import FeedbackCue, FrameAnalysisResponse, ScoreResult
-from .utils import draw_text_block, frame_to_base64, now_utc
+from .utils import frame_to_base64, now_utc
+
+
+POSE_CONFIDENCE_THRESHOLD = 0.70
+POSE_CONFIDENCE_GATED_MODES = {"shooting_form", "dribbling", "passing"}
+MIN_CONFIDENT_POSE_LANDMARKS = 6
 
 
 def run_coaching_analysis(
@@ -25,10 +30,11 @@ def run_coaching_analysis(
     include_base64: bool = True,
 ) -> dict[str, Any]:
     pose_result = pose_estimator.detect(frame, smoother=landmark_smoother, timestamp=timestamp_seconds)
+    pose_detected = _pose_detected_for_mode(pose_result, mode=mode)
+    landmarks = _landmarks_for_mode(pose_result, mode=mode) if pose_detected else {}
     ball_box = ball_detector.detect(frame)
-    features = extract_features(mode=mode, landmarks=pose_result["landmarks"], ball_box=ball_box)
+    features = extract_features(mode=mode, landmarks=landmarks, ball_box=ball_box)
     feedback, summary = generate_feedback(mode=mode, features=features, ball_detected=ball_box is not None)
-    pose_detected = bool(pose_result["pose_detected"])
     ball_detected = ball_box is not None
 
     if not pose_detected:
@@ -54,7 +60,8 @@ def run_coaching_analysis(
     score = calculate_score(feedback)
     score = _cap_invalid_frame_score(score, pose_detected=pose_detected, ball_detected=ball_detected)
 
-    annotated = pose_estimator.draw(frame, pose_result.get("drawing_landmarks") or pose_result["raw_landmarks"])
+    drawing_landmarks = pose_result.get("drawing_landmarks") or pose_result["raw_landmarks"]
+    annotated = pose_estimator.draw(frame, drawing_landmarks if pose_detected else None)
     if ball_box:
         cv2.rectangle(
             annotated,
@@ -74,13 +81,6 @@ def run_coaching_analysis(
             cv2.LINE_AA,
         )
 
-    text_lines = [
-        f"Mode: {mode.replace('_', ' ').title()}",
-        f"Score: {score.score} ({score.classification})",
-        f"Cue: {feedback[0].message}",
-    ]
-    annotated = draw_text_block(annotated, text_lines)
-
     response = FrameAnalysisResponse(
         session_id=session_id,
         mode=mode,
@@ -93,7 +93,7 @@ def run_coaching_analysis(
         score=score,
         coaching_summary=summary,
         ball_box=ball_box,
-        landmarks=pose_result["landmarks"],
+        landmarks=landmarks,
         annotated_frame_base64=frame_to_base64(annotated) if include_base64 else None,
     )
 
@@ -101,6 +101,34 @@ def run_coaching_analysis(
         "response": response,
         "annotated_frame": annotated,
     }
+
+
+def _pose_detected_for_mode(pose_result: dict[str, Any], *, mode: str) -> bool:
+    if not bool(pose_result.get("pose_detected", False)):
+        return False
+    if mode not in POSE_CONFIDENCE_GATED_MODES:
+        return True
+    return len(_landmarks_for_mode(pose_result, mode=mode)) >= MIN_CONFIDENT_POSE_LANDMARKS
+
+
+def _landmarks_for_mode(pose_result: dict[str, Any], *, mode: str) -> dict[str, Any]:
+    landmarks = pose_result.get("landmarks") or {}
+    if mode not in POSE_CONFIDENCE_GATED_MODES:
+        return landmarks
+    return {
+        name: point
+        for name, point in landmarks.items()
+        if _landmark_visibility(point) >= POSE_CONFIDENCE_THRESHOLD
+    }
+
+
+def _landmark_visibility(point: Any) -> float:
+    try:
+        if isinstance(point, dict):
+            return float(point.get("visibility", 0.0))
+        return float(getattr(point, "visibility", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _cap_invalid_frame_score(score: ScoreResult, *, pose_detected: bool, ball_detected: bool) -> ScoreResult:

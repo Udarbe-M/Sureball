@@ -57,6 +57,24 @@ class ClipValidityTests(unittest.TestCase):
         self.assertEqual(result.classification, "Good")
         self.assertEqual(result.warnings, [])
 
+    def test_shooting_visible_setup_evidence_prevents_false_setup_warning(self):
+        result = apply_coaching_clip_validity(
+            mode="shooting_form",
+            average_score=82,
+            best_score=90,
+            worst_score=70,
+            analyzed_frames=20,
+            pose_frames=20,
+            ball_frames=20,
+            action_label="Shots",
+            action_count=0,
+            shooting_evidence_frames=4,
+        )
+
+        self.assertEqual(result.average_score, 82)
+        self.assertEqual(result.classification, "Good")
+        self.assertEqual(result.warnings, [])
+
     def test_validity_warnings_take_priority_over_normal_feedback(self):
         feedback = merge_validity_warnings(
             ["No basketball detected. Keep the ball visible throughout the clip."],

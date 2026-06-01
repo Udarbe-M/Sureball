@@ -105,6 +105,8 @@ class SessionRecord(BaseModel):
     source_type: Literal["frame", "video", "shot_training_video"]
     action_count: int = 0
     action_label: Optional[str] = None
+    shooting_stats: Dict[str, object] = Field(default_factory=dict)
+    shot_events: List[Dict[str, object]] = Field(default_factory=list)
     user_key: Optional[str] = None
 
 
@@ -126,6 +128,15 @@ class ShotTrainingStats(BaseModel):
     accuracy: float = 0.0
 
 
+class ShotEvent(BaseModel):
+    shot_number: int
+    result: str = "pending"
+    timestamp_seconds: float = 0.0
+    start_frame: int = 0
+    result_timestamp_seconds: Optional[float] = None
+    result_frame: Optional[int] = None
+
+
 class ShotTrainingStartResponse(BaseModel):
     file_id: str
     status: ShotTrainingStatus
@@ -142,6 +153,7 @@ class ShotTrainingStatusResponse(BaseModel):
     total_frames: int = 0
     progress_percentage: int = 0
     stats: ShotTrainingStats = Field(default_factory=ShotTrainingStats)
+    shot_events: List[ShotEvent] = Field(default_factory=list)
     classification: Optional[str] = None
     summary: Optional[str] = None
     error_message: Optional[str] = None
@@ -175,6 +187,7 @@ class CoachingVideoStatusResponse(BaseModel):
     action_count: int = 0
     action_label: Optional[str] = None
     shooting_stats: ShotTrainingStats = Field(default_factory=ShotTrainingStats)
+    shot_events: List[ShotEvent] = Field(default_factory=list)
     dominant_feedback: List[str] = Field(default_factory=list)
     classification: Optional[str] = None
     summary: Optional[str] = None

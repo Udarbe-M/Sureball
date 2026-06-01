@@ -28,6 +28,7 @@ export async function archiveCompletedSession({
 
   await saveSessionRecord(userKey, {
     ...record,
+    remoteVideoUrl,
     localVideoUri: localVideoUri || null,
   });
 

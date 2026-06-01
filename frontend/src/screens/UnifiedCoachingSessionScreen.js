@@ -4,7 +4,7 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
 import { VideoView, useVideoPlayer } from "expo-video";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Linking, PanResponder, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from "react-native";
+import { Linking, PanResponder, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -58,6 +58,41 @@ const COACHING_OVERLAY_OPTIONS = [
   },
 ];
 
+const REVIEW_LEVELS = [
+  { id: "beginner", title: "Beginner" },
+  { id: "intermediate", title: "Intermediate" },
+];
+
+const COLLAPSED_SHEET_HEIGHT_ESTIMATE = 108;
+const SHEET_TOP_OVERLAP = 20;
+
+const MODE_SETUP_GUIDES = {
+  shooting_form: {
+    title: "Shooting Setup",
+    tips: [
+      "Keep the player, ball, hoop, and landing visible.",
+      "Use a side or front angle with the full body in frame.",
+      "Avoid zooming during the release and hoop entry.",
+    ],
+  },
+  dribbling: {
+    title: "Dribbling Setup",
+    tips: [
+      "Show the full body, both hands, and the ball bounce.",
+      "Keep the phone far enough to see knees, hips, and feet.",
+      "Use steady lighting so fast ball movement stays visible.",
+    ],
+  },
+  passing: {
+    title: "Passing Setup",
+    tips: [
+      "Show hands, ball, chest, and target direction.",
+      "Use a side or front angle that catches the release.",
+      "Keep the body balanced in frame after the pass.",
+    ],
+  },
+};
+
 const INITIAL_COACHING_RESULTS = {
   analyzedFrames: 0,
   poseFrames: 0,
@@ -70,6 +105,7 @@ const INITIAL_COACHING_RESULTS = {
   actionCount: 0,
   actionLabel: "",
   shootingStats: { attempts: 0, makes: 0, misses: 0, accuracy: 0 },
+  shotEvents: [],
   classification: "",
   summary: "",
   dominantFeedback: [],
@@ -81,6 +117,10 @@ function clampPercent(value) {
     return 0;
   }
   return Math.max(0, Math.min(Math.round(numericValue), 100));
+}
+
+function clampValue(value, min, max) {
+  return Math.max(min, Math.min(value, max));
 }
 
 function buildScoreExplanation({ activeMode, results }) {
@@ -103,9 +143,221 @@ function buildScoreExplanation({ activeMode, results }) {
   ];
 }
 
+function buildSetupGuide(activeMode) {
+  return MODE_SETUP_GUIDES[activeMode.id] || MODE_SETUP_GUIDES.shooting_form;
+}
+
+function normalizeShotEvents(events) {
+  if (!Array.isArray(events)) {
+    return [];
+  }
+  return events
+    .map((event, index) => {
+      const source = event || {};
+      const timestampSeconds = numericOrNull(source.timestampSeconds ?? source.timestamp_seconds);
+      const resultTimestampSeconds = numericOrNull(source.resultTimestampSeconds ?? source.result_timestamp_seconds);
+      const reviewStartSeconds = timestampSeconds ?? resultTimestampSeconds ?? 0;
+      return {
+        shotNumber: Number(source.shotNumber ?? source.shot_number ?? index + 1) || index + 1,
+        result: String(source.result || "pending").toLowerCase(),
+        timestampSeconds: reviewStartSeconds,
+        resultTimestampSeconds,
+        reviewSeconds: Math.max(0, reviewStartSeconds - 1),
+      };
+    })
+    .sort((a, b) => a.shotNumber - b.shotNumber);
+}
+
+function numericOrNull(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function formatShotTime(seconds) {
+  const safeSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainder = String(safeSeconds % 60).padStart(2, "0");
+  return `${minutes}:${remainder}`;
+}
+
+function formatShotResult(result) {
+  if (result === "make") return "Make";
+  if (result === "miss") return "Miss";
+  return "Review";
+}
+
+function shotResultColor(result) {
+  if (result === "make") return colors.success;
+  if (result === "miss") return colors.warning;
+  return colors.secondary;
+}
+
+function shotFeedbackText(result, reviewLevel = "beginner") {
+  if (result === "make") {
+    return reviewLevel === "intermediate"
+      ? "Good result. Check setup, release, and landing so you can repeat the same pattern."
+      : "Good result. Replay this shot and copy the same rhythm.";
+  }
+  if (result === "miss") {
+    return reviewLevel === "intermediate"
+      ? "Missed shot. Review knee bend, release line, follow-through, and whether the ball path stayed centered."
+      : "Missed shot. Check balance, release line, and ball path.";
+  }
+  return reviewLevel === "intermediate"
+    ? "Result not clear. Check if the ball, hoop, and shooting motion are visible in this moment."
+    : "Result not clear. Watch this moment and check if the ball and hoop are visible.";
+}
+
+function buildTrackingReview(results) {
+  const poseRate = Number(results.poseDetectionRate || 0);
+  const ballRate = Number(results.ballDetectionRate || 0);
+  const trackingRate = Math.min(poseRate, ballRate);
+  if (trackingRate >= 70) {
+    return {
+      label: "Good",
+      color: colors.success,
+      text: "The camera view was clear enough for useful coaching.",
+    };
+  }
+  if (trackingRate >= 45) {
+    return {
+      label: "Fair",
+      color: colors.warning,
+      text: "Useful review, but some moments may be affected by camera angle or blur.",
+    };
+  }
+  return {
+    label: "Low",
+    color: colors.danger,
+    text: "Treat the score carefully. Try a clearer full-body angle next time.",
+  };
+}
+
+function buildCoachReview({ activeMode, results }) {
+  const mainFocus = results.dominantFeedback?.[0] || "Keep reviewing the annotated video and repeat your best reps.";
+  const tracking = buildTrackingReview(results);
+  const score = Number(results.averageScore || 0);
+  const scoreText =
+    score >= 80
+      ? "Strong clip. Use the video to repeat what worked."
+      : score >= 60
+        ? "Good starting point. Fix the main focus first, then retest."
+        : "Use this as a practice guide. Focus on one simple cue before worrying about the score.";
+  const nextDrill =
+    activeMode.id === "shooting_form"
+      ? "Next drill: take 10 close shots and focus only on the main cue."
+      : activeMode.id === "dribbling"
+        ? "Next drill: 30 seconds of controlled low dribbles while staying balanced."
+        : "Next drill: 10 chest passes, finishing with your hands toward the target.";
+
+  return {
+    mainFocus,
+    tracking,
+    scoreText,
+    nextDrill,
+  };
+}
+
+function buildModeReview({ activeMode, results }) {
+  const actionCount = Number(results.actionCount || 0);
+  const focus = results.dominantFeedback?.[0] || "Keep the ball and body visible, then repeat the drill with control.";
+  const score = Number(results.averageScore || 0);
+  const tracking = buildTrackingReview(results);
+
+  if (activeMode.id === "dribbling") {
+    return {
+      title: "Dribbling Review",
+      actionLabel: "Dribbles Counted",
+      actionValue: actionCount,
+      intro: "Use this to check control, stance, and rhythm while watching the annotated clip.",
+      sections: [
+        buildReviewStatus("Ball Control", score, "Keep the ball close to your hand through each bounce."),
+        buildReviewStatus("Stance", Math.min(score, Number(results.poseDetectionRate || 0)), "Stay low with bent knees and balanced hips."),
+        buildReviewStatus("Rhythm", actionCount > 0 ? 78 : 45, "Aim for steady bounces instead of rushed or missed contacts."),
+      ],
+      beginnerCue: focus,
+      intermediateCue: "Check if the ball stays near the hand, below the hip, and close to the body line.",
+      nextDrill: "Next drill: 30 seconds of low controlled dribbles, then switch hands.",
+      tracking,
+    };
+  }
+
+  if (activeMode.id === "passing") {
+    return {
+      title: "Passing Review",
+      actionLabel: "Passes Counted",
+      actionValue: actionCount,
+      intro: "Use this to check release line, ball connection, and balance through the pass.",
+      sections: [
+        buildReviewStatus("Release Line", score, "Finish with your hands pointed toward the target."),
+        buildReviewStatus("Ball Connection", Math.min(score, Number(results.ballDetectionRate || 0)), "Keep the ball connected to your hands before release."),
+        buildReviewStatus("Balance", Math.min(score, Number(results.poseDetectionRate || 0)), "Stay balanced instead of leaning out of the pass."),
+      ],
+      beginnerCue: focus,
+      intermediateCue: "Review elbow extension, wrist line, ball-to-hand distance, and balance at release.",
+      nextDrill: "Next drill: 10 chest passes, freeze your follow-through after every pass.",
+      tracking,
+    };
+  }
+
+  return null;
+}
+
+function buildReviewStatus(label, value, tip) {
+  const numericValue = Number(value || 0);
+  if (numericValue >= 75) {
+    return { label, status: "Good", color: colors.success, tip };
+  }
+  if (numericValue >= 55) {
+    return { label, status: "Fair", color: colors.warning, tip };
+  }
+  return { label, status: "Needs Work", color: colors.danger, tip };
+}
+
+function buildReviewMoments({ activeMode, results, shotEvents }) {
+  if (activeMode.id === "shooting_form") {
+    return shotEvents;
+  }
+
+  const hasAnalysis = Number(results.analyzedFrames || 0) > 0;
+  if (!hasAnalysis) {
+    return [];
+  }
+
+  if (activeMode.id === "dribbling") {
+    return [
+      { label: "Start Stance", result: "review", timestampSeconds: 0, reviewSeconds: 0 },
+      { label: "Control Check", result: "review", timestampSeconds: 5, reviewSeconds: 5 },
+      { label: "Finish Rhythm", result: "review", timestampSeconds: 10, reviewSeconds: 10 },
+    ];
+  }
+
+  if (activeMode.id === "passing") {
+    return [
+      { label: "Load", result: "review", timestampSeconds: 0, reviewSeconds: 0 },
+      { label: "Release Line", result: "review", timestampSeconds: 5, reviewSeconds: 5 },
+      { label: "Balance Finish", result: "review", timestampSeconds: 10, reviewSeconds: 10 },
+    ];
+  }
+
+  return [];
+}
+
 export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const initialModeId = route.params?.initialModeId || "shooting_form";
   const { playerEmail, playerName, userId } = useAuth();
+  const { height: viewportHeight } = useWindowDimensions();
+  const collapsedCameraHeight = Math.min(
+    Math.max(430, Math.round(viewportHeight - COLLAPSED_SHEET_HEIGHT_ESTIMATE + SHEET_TOP_OVERLAP)),
+    Math.max(360, viewportHeight - 86)
+  );
+  const expandedCameraHeight = Math.min(
+    Math.max(280, Math.round(viewportHeight * 0.43)),
+    Math.max(280, collapsedCameraHeight - 220)
+  );
   const [selectedModeId, setSelectedModeId] = useState(initialModeId);
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [videoSource, setVideoSource] = useState("camera");
@@ -127,11 +379,17 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const [recording, setRecording] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [overlayMode, setOverlayMode] = useState("focus_feedback");
+  const [reviewLevel, setReviewLevel] = useState("beginner");
+  const [miniGoalsEnabled, setMiniGoalsEnabled] = useState(true);
   const [recordingStatus, setRecordingStatus] = useState("Frame the player, then record or upload a clip.");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
   const uploadAbortRef = useRef(null);
   const cameraReadyTimerRef = useRef(null);
+  const sheetContentScrollRef = useRef(null);
+  const sheetDragStartHeightRef = useRef(collapsedCameraHeight);
+  const cameraStageHeightRef = useRef(collapsedCameraHeight);
+  const [cameraStageHeight, setCameraStageHeight] = useState(collapsedCameraHeight);
 
   const userKey = useMemo(
     () => buildUserKey({ userId, playerName, playerEmail }),
@@ -148,6 +406,26 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const scoreExplanation = useMemo(
     () => buildScoreExplanation({ activeMode, results: coachingResults }),
     [activeMode, coachingResults]
+  );
+  const setupGuide = useMemo(
+    () => buildSetupGuide(activeMode),
+    [activeMode]
+  );
+  const coachReview = useMemo(
+    () => buildCoachReview({ activeMode, results: coachingResults }),
+    [activeMode, coachingResults]
+  );
+  const reviewShotEvents = useMemo(
+    () => normalizeShotEvents(coachingResults.shotEvents),
+    [coachingResults.shotEvents]
+  );
+  const modeReview = useMemo(
+    () => buildModeReview({ activeMode, results: coachingResults }),
+    [activeMode, coachingResults]
+  );
+  const reviewMoments = useMemo(
+    () => buildReviewMoments({ activeMode, results: coachingResults, shotEvents: reviewShotEvents }),
+    [activeMode, coachingResults, reviewShotEvents]
   );
 
   const resultVideoUrl = useMemo(() => {
@@ -195,6 +473,60 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
     [recording, selectedModeId, starting, status]
   );
 
+  const sheetDragResponder = useMemo(
+    () => {
+      const shouldStartSheetDrag = (_event, gestureState) => {
+        const verticalDrag = Math.abs(gestureState.dy) > 8 && Math.abs(gestureState.dy) > Math.abs(gestureState.dx);
+        if (!verticalDrag) {
+          return false;
+        }
+        const draggingUp = gestureState.dy < 0;
+        const draggingDown = gestureState.dy > 0;
+        const canExpand = cameraStageHeightRef.current > expandedCameraHeight + 2;
+        const canCollapse = cameraStageHeightRef.current < collapsedCameraHeight - 2;
+
+        return (draggingUp && canExpand) || (draggingDown && canCollapse);
+      };
+
+      return PanResponder.create({
+        onMoveShouldSetPanResponder: shouldStartSheetDrag,
+        onMoveShouldSetPanResponderCapture: shouldStartSheetDrag,
+        onPanResponderGrant: () => {
+          sheetDragStartHeightRef.current = cameraStageHeightRef.current;
+        },
+        onPanResponderMove: (_event, gestureState) => {
+          const nextHeight = clampValue(
+            sheetDragStartHeightRef.current + gestureState.dy,
+            expandedCameraHeight,
+            collapsedCameraHeight
+          );
+          cameraStageHeightRef.current = nextHeight;
+          setCameraStageHeight(nextHeight);
+        },
+        onPanResponderRelease: (_event, gestureState) => {
+          const projectedHeight = sheetDragStartHeightRef.current + gestureState.dy + gestureState.vy * 70;
+          const midpoint = (expandedCameraHeight + collapsedCameraHeight) / 2;
+          const nextHeight =
+            gestureState.vy < -0.55 || projectedHeight < midpoint ? expandedCameraHeight : collapsedCameraHeight;
+          cameraStageHeightRef.current = nextHeight;
+          setCameraStageHeight(nextHeight);
+          if (nextHeight === collapsedCameraHeight) {
+            resetSheetContentScroll();
+          }
+          hapticSelection();
+        },
+        onPanResponderTerminationRequest: () => false,
+      });
+    },
+    [collapsedCameraHeight, expandedCameraHeight]
+  );
+
+  useEffect(() => {
+    const nextHeight = clampValue(cameraStageHeightRef.current, expandedCameraHeight, collapsedCameraHeight);
+    cameraStageHeightRef.current = nextHeight;
+    setCameraStageHeight(nextHeight);
+  }, [collapsedCameraHeight, expandedCameraHeight]);
+
   useEffect(() => {
     const nextModeId = route.params?.initialModeId || "shooting_form";
     const nextMode = MODES.find((item) => item.id === nextModeId) || MODES[0];
@@ -230,6 +562,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           actionCount: result.action_count || 0,
           actionLabel: result.action_label || "",
           shootingStats: result.shooting_stats || INITIAL_COACHING_RESULTS.shootingStats,
+          shotEvents: result.shot_events || [],
           classification: result.classification || "",
           summary: result.summary || "",
           dominantFeedback: result.dominant_feedback || [],
@@ -258,6 +591,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
               actionCount: result.action_count || 0,
               actionLabel: result.action_label || "",
               shootingStats: result.shooting_stats || INITIAL_COACHING_RESULTS.shootingStats,
+              shotEvents: result.shot_events || [],
               classification: result.classification || "Needs Improvement",
               detectedErrors: (result.dominant_feedback || []).map((message) => ({
                 issue: message,
@@ -490,6 +824,20 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
     handleModeChange(MODES[nextIndex].id);
   }
 
+  function resetSheetContentScroll() {
+    sheetContentScrollRef.current?.scrollTo({ y: 0, animated: false });
+  }
+
+  function setBottomModeTrayOpen(open) {
+    const nextHeight = open ? expandedCameraHeight : collapsedCameraHeight;
+    cameraStageHeightRef.current = nextHeight;
+    setCameraStageHeight(nextHeight);
+    if (!open) {
+      resetSheetContentScroll();
+    }
+    hapticSelection();
+  }
+
   async function handleStartSession() {
     if (!selectedVideo) {
       return;
@@ -589,11 +937,13 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
     cameraTrouble ||
     recordingStatus === "Finishing clip...";
   const recordButtonAction = recording ? stopRecordingClip : cameraOpen ? startRecordingClip : openCameraRecorder;
-  const statusLabel = status === "idle" ? "Ready" : status.replace(/_/g, " ");
+  const bottomModeTrayOpen = cameraStageHeight < collapsedCameraHeight - 40;
+  const trainingMenuBottomOffset = bottomModeTrayOpen ? 104 : 118;
+  const trainingMenuMaxHeight = Math.max(88, cameraStageHeight - trainingMenuBottomOffset - 96);
 
   return (
     <View style={cameraStyles.screen}>
-      <View style={cameraStyles.cameraStage} {...modeSwipeResponder.panHandlers}>
+      <View style={[cameraStyles.cameraStage, { height: cameraStageHeight }]} {...modeSwipeResponder.panHandlers}>
         {cameraPowered ? (
           <>
             <CameraView
@@ -623,7 +973,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
             ) : null}
           </>
         ) : (
-          <View style={cameraStyles.cameraFallback}>
+          <View style={[cameraStyles.cameraFallback, !bottomModeTrayOpen && cameraStyles.cameraFallbackCardDown]}>
             <Feather name={cameraFallbackIcon} size={42} color={colors.primary} />
             <Text style={cameraStyles.fallbackTitle}>{cameraFallbackTitle}</Text>
             <Text style={cameraStyles.fallbackText}>{cameraFallbackText}</Text>
@@ -656,19 +1006,6 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           <Text style={cameraStyles.modeBadgeMeta}>{selectedOverlay?.title}</Text>
         </View>
 
-        <View style={cameraStyles.rightRail}>
-          <CameraIconButton icon="clock" onPress={() => navigation.navigate("SessionHistory")} />
-          <CameraIconButton icon="settings" onPress={() => navigation.navigate("Settings")} />
-          <CameraIconButton
-            icon={cameraPowered ? "camera" : "camera-off"}
-            onPress={toggleCameraPower}
-            disabled={recording}
-            active={cameraPowered}
-            badge={cameraPowered ? "ON" : "OFF"}
-            accessibilityLabel={cameraToggleLabel}
-          />
-        </View>
-
         {recording ? (
           <View style={cameraStyles.recordingPill}>
             <Text style={cameraStyles.recordingText}>REC</Text>
@@ -676,86 +1013,90 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         ) : null}
 
         {menuOpen ? (
-          <View style={cameraStyles.modeMenu}>
-            <Text style={cameraStyles.menuEyebrow}>Coaching Mode</Text>
-            <Text style={cameraStyles.menuTitle}>Pick a drill</Text>
-            <View style={cameraStyles.modeGrid}>
-              {MODES.map((mode) => (
-                <TouchableOpacity
-                  key={mode.id}
-                  activeOpacity={0.9}
-                  onPress={() => handleModeChange(mode.id)}
-                  disabled={busyWithAnalysis || recording}
-                  style={[cameraStyles.modeOption, selectedModeId === mode.id && cameraStyles.modeOptionActive]}
-                >
-                  <Text style={cameraStyles.modeOptionTag}>{mode.tag}</Text>
-                  <Text style={cameraStyles.modeOptionTitle}>{mode.title}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <Text style={[cameraStyles.menuEyebrow, { marginTop: 16 }]}>Output</Text>
-            <View style={cameraStyles.overlayRow}>
-              {COACHING_OVERLAY_OPTIONS.map((option) => (
-                <TouchableOpacity
-                  key={option.id}
-                  activeOpacity={0.9}
-                  onPress={() => setOverlayMode(option.id)}
-                  disabled={busyWithAnalysis}
-                  style={[cameraStyles.overlayPill, option.id === overlayMode && cameraStyles.overlayPillActive]}
-                >
-                  <Text style={[cameraStyles.overlayPillText, option.id === overlayMode && cameraStyles.overlayPillTextActive]}>
-                    {option.title}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <View style={cameraStyles.testRow}>
+          <View style={[cameraStyles.modeMenu, { bottom: trainingMenuBottomOffset, maxHeight: trainingMenuMaxHeight }]}>
+            <View style={cameraStyles.menuHeader}>
               <View style={{ flex: 1 }}>
-                <Text style={cameraStyles.testTitle}>Quick test</Text>
-                <Text style={cameraStyles.testCopy}>Analyze about 15 seconds.</Text>
+                <Text style={cameraStyles.menuEyebrow}>Training Menu</Text>
+                <Text style={cameraStyles.menuTitle}>Quick controls</Text>
               </View>
-              <Switch
-                value={testMode}
-                onValueChange={setTestMode}
-                thumbColor={colors.text}
-                trackColor={{ false: colors.track, true: colors.primary }}
-                disabled={busyWithAnalysis || recording}
-              />
+              <TouchableOpacity
+                activeOpacity={0.85}
+                accessibilityLabel="Close coaching mode menu"
+                onPress={() => {
+                  hapticSelection();
+                  setMenuOpen(false);
+                }}
+                style={cameraStyles.menuCloseButton}
+              >
+                <Feather name="x" size={20} color={colors.text} />
+              </TouchableOpacity>
             </View>
-          </View>
-        ) : null}
 
-        {!menuOpen ? (
-          <View style={cameraStyles.modeStrip}>
-            {MODES.map((mode) => {
-              const active = selectedModeId === mode.id;
-              return (
+            <ScrollView
+              style={cameraStyles.menuBody}
+              contentContainerStyle={cameraStyles.menuBodyContent}
+              showsVerticalScrollIndicator={bottomModeTrayOpen}
+              bounces={bottomModeTrayOpen}
+            >
+              <View style={cameraStyles.testRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={cameraStyles.testTitle}>Quick test</Text>
+                  <Text style={cameraStyles.testCopy}>Analyze about 15 seconds.</Text>
+                </View>
+                <Switch
+                  value={testMode}
+                  onValueChange={setTestMode}
+                  thumbColor={colors.text}
+                  trackColor={{ false: colors.track, true: colors.primary }}
+                  disabled={busyWithAnalysis || recording}
+                />
+              </View>
+
+              <Text style={[cameraStyles.menuEyebrow, { marginTop: 16 }]}>Tools</Text>
+              <View style={cameraStyles.menuToolRow}>
                 <TouchableOpacity
-                  key={mode.id}
                   activeOpacity={0.9}
-                  onPress={() => handleModeChange(mode.id)}
-                  disabled={status === "processing" || starting || recording}
-                  style={[cameraStyles.modeChip, active && cameraStyles.modeChipActive]}
+                  onPress={() => {
+                    hapticSelection();
+                    setMenuOpen(false);
+                    navigation.navigate("SessionHistory");
+                  }}
+                  style={cameraStyles.menuToolButton}
                 >
-                  <Text style={[cameraStyles.modeChipText, active && cameraStyles.modeChipTextActive]}>{mode.title}</Text>
+                  <Feather name="clock" size={16} color={colors.text} />
+                  <Text style={cameraStyles.menuToolText}>History</Text>
                 </TouchableOpacity>
-              );
-            })}
+                <TouchableOpacity
+                  activeOpacity={0.9}
+                  onPress={() => {
+                    hapticSelection();
+                    setMenuOpen(false);
+                    navigation.navigate("Settings");
+                  }}
+                  style={cameraStyles.menuToolButton}
+                >
+                  <Feather name="settings" size={16} color={colors.text} />
+                  <Text style={cameraStyles.menuToolText}>Settings</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  activeOpacity={0.9}
+                  accessibilityLabel={cameraToggleLabel}
+                  onPress={() => {
+                    setMenuOpen(false);
+                    toggleCameraPower();
+                  }}
+                  disabled={recording}
+                  style={[cameraStyles.menuToolButton, recording && cameraStyles.disabledControl]}
+                >
+                  <Feather name={cameraPowered ? "camera-off" : "camera"} size={16} color={colors.text} />
+                  <Text style={cameraStyles.menuToolText}>{cameraPowered ? "Camera Off" : "Camera On"}</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
           </View>
         ) : null}
 
         <View style={cameraStyles.captureTray}>
-          <TouchableOpacity
-            activeOpacity={0.9}
-            onPress={pickVideo}
-            disabled={busyWithAnalysis || recording}
-            style={[cameraStyles.trayButton, (busyWithAnalysis || recording) && cameraStyles.disabledControl]}
-          >
-            <Feather name="upload" size={21} color={colors.text} />
-          </TouchableOpacity>
-
           <TouchableOpacity
             activeOpacity={0.85}
             onPress={recordButtonAction}
@@ -768,73 +1109,152 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           >
             <View style={[cameraStyles.recordButtonInner, recording && cameraStyles.recordButtonStop]} />
           </TouchableOpacity>
+        </View>
+      </View>
 
+      <View
+        style={[
+          cameraStyles.sessionSheet,
+          !bottomModeTrayOpen && cameraStyles.sessionSheetCollapsed,
+          bottomModeTrayOpen && cameraStyles.sessionSheetExpanded,
+        ]}
+      >
+        <View
+          style={[cameraStyles.sheetDragHeader, !bottomModeTrayOpen && cameraStyles.sheetDragHeaderCollapsed]}
+          {...sheetDragResponder.panHandlers}
+        >
+          <View style={[cameraStyles.sheetHandle, !bottomModeTrayOpen && cameraStyles.sheetHandleCollapsed]} />
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={() => setBottomModeTrayOpen(!bottomModeTrayOpen)}
+            style={[cameraStyles.modeTrayHeader, !bottomModeTrayOpen && cameraStyles.modeTrayHeaderCollapsed]}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={cameraStyles.sheetEyebrow}>Current Mode</Text>
+              <Text style={cameraStyles.sheetTitle}>{activeMode.title}</Text>
+              <Text style={[cameraStyles.sheetCopy, !bottomModeTrayOpen && cameraStyles.sheetCopyCollapsed]}>
+                {bottomModeTrayOpen ? "Drag down to hide this card." : "Drag up to choose a mode."}
+              </Text>
+            </View>
+          </TouchableOpacity>
+        </View>
+
+        {bottomModeTrayOpen ? (
+          <ScrollView
+            ref={sheetContentScrollRef}
+            style={cameraStyles.sessionSheetBody}
+            contentContainerStyle={cameraStyles.sessionSheetContent}
+            showsVerticalScrollIndicator
+            bounces
+          >
+            <View style={cameraStyles.bottomModeGrid}>
+                {MODES.map((mode) => {
+                  const active = selectedModeId === mode.id;
+                  return (
+                    <TouchableOpacity
+                      key={mode.id}
+                      activeOpacity={0.9}
+                      onPress={() => handleModeChange(mode.id)}
+                      disabled={busyWithAnalysis || recording}
+                      style={[cameraStyles.bottomModeOption, active && cameraStyles.bottomModeOptionActive]}
+                    >
+                      <Text style={[cameraStyles.bottomModeTag, active && cameraStyles.bottomModeTextActive]}>{mode.tag}</Text>
+                      <Text style={[cameraStyles.bottomModeTitle, active && cameraStyles.bottomModeTextActive]}>
+                        {mode.title}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={cameraStyles.bottomTrayLabel}>Output</Text>
+              <View style={cameraStyles.bottomOutputRow}>
+                {COACHING_OVERLAY_OPTIONS.map((option) => (
+                  <TouchableOpacity
+                    key={option.id}
+                    activeOpacity={0.9}
+                    onPress={() => {
+                      hapticSelection();
+                      setOverlayMode(option.id);
+                    }}
+                    disabled={busyWithAnalysis}
+                    style={[cameraStyles.overlayPill, option.id === overlayMode && cameraStyles.overlayPillActive]}
+                  >
+                    <Text style={[cameraStyles.overlayPillText, option.id === overlayMode && cameraStyles.overlayPillTextActive]}>
+                      {option.title}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            <View style={cameraStyles.sessionStatusRow}>
+              <Text style={cameraStyles.sheetCopy}>{recordingStatus}</Text>
+            </View>
+
+          <SetupGuidePanel guide={setupGuide} />
+
+          <View style={cameraStyles.clipPanel}>
+            <Text style={cameraStyles.clipLabel}>Clip</Text>
+            <Text style={cameraStyles.clipValue}>{selectedVideoLabel}</Text>
+            <Text style={cameraStyles.clipHelp}>
+              Record or upload a clip. The backend analyzes it with YOLOv11 basketball detection and MediaPipe pose tracking.
+            </Text>
+            <View style={cameraStyles.backendStatusRow}>
+              <View
+                style={[
+                  cameraStyles.backendDot,
+                  {
+                    backgroundColor:
+                      backendStatus.ready === null
+                        ? colors.warning
+                        : backendStatus.ready
+                          ? colors.success
+                          : colors.danger,
+                  },
+                ]}
+              />
+              <Text
+                style={[
+                  cameraStyles.backendStatusText,
+                  { color: backendStatus.ready === false ? colors.danger : colors.muted },
+                ]}
+              >
+                {backendStatus.label}
+              </Text>
+            </View>
+          </View>
+
+        <View style={cameraStyles.sheetActionRow}>
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={pickVideo}
+            disabled={busyWithAnalysis || recording}
+            style={[cameraStyles.sheetSecondaryAction, (busyWithAnalysis || recording) && cameraStyles.disabledControl]}
+          >
+            <Feather name="upload" size={17} color={colors.text} />
+            <Text style={cameraStyles.sheetSecondaryActionText}>Upload Clip</Text>
+          </TouchableOpacity>
           <TouchableOpacity
             activeOpacity={0.9}
             onPress={handleStartSession}
             disabled={!selectedVideo || busyWithAnalysis || recording || backendUnavailable}
             style={[
-              cameraStyles.analyzeButton,
+              cameraStyles.sheetPrimaryAction,
               (!selectedVideo || busyWithAnalysis || recording || backendUnavailable) && cameraStyles.disabledControl,
             ]}
           >
-            <Feather name="activity" size={18} color="#091220" />
-            <Text style={cameraStyles.analyzeButtonText}>{busyWithAnalysis ? "Busy" : "Analyze"}</Text>
+            <Feather name="activity" size={17} color="#091220" />
+            <Text style={cameraStyles.sheetPrimaryActionText}>{busyWithAnalysis ? "Busy" : "Analyze"}</Text>
           </TouchableOpacity>
         </View>
-      </View>
 
-      <ScrollView style={cameraStyles.sessionSheet} contentContainerStyle={cameraStyles.sessionSheetContent}>
-        <View style={cameraStyles.sheetHandle} />
-        <View style={cameraStyles.sessionHeaderRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={cameraStyles.sheetEyebrow}>{playerName}</Text>
-            <Text style={cameraStyles.sheetTitle}>{activeMode.title}</Text>
-            <Text style={cameraStyles.sheetCopy}>{recordingStatus}</Text>
+        {bottomModeTrayOpen || busyWithAnalysis || progress > 0 ? (
+          <View style={cameraStyles.progressRow}>
+            <Text style={cameraStyles.progressLabel}>Progress</Text>
+            <View style={cameraStyles.progressTrack}>
+              <View style={[cameraStyles.progressFill, { width: `${displayedProgress}%` }]} />
+            </View>
+            <Text style={cameraStyles.progressNumber}>{displayedProgress}%</Text>
           </View>
-          <View style={cameraStyles.statusChip}>
-            <Text style={cameraStyles.statusChipText}>{statusLabel}</Text>
-          </View>
-        </View>
-
-        <View style={cameraStyles.clipPanel}>
-          <Text style={cameraStyles.clipLabel}>Clip</Text>
-          <Text style={cameraStyles.clipValue}>{selectedVideoLabel}</Text>
-          <Text style={cameraStyles.clipHelp}>
-            Record or upload a clip. The backend analyzes it with YOLOv11 basketball detection and MediaPipe pose tracking.
-          </Text>
-          <View style={cameraStyles.backendStatusRow}>
-            <View
-              style={[
-                cameraStyles.backendDot,
-                {
-                  backgroundColor:
-                    backendStatus.ready === null
-                      ? colors.warning
-                      : backendStatus.ready
-                        ? colors.success
-                        : colors.danger,
-                },
-              ]}
-            />
-            <Text
-              style={[
-                cameraStyles.backendStatusText,
-                { color: backendStatus.ready === false ? colors.danger : colors.muted },
-              ]}
-            >
-              {backendStatus.label}
-            </Text>
-          </View>
-        </View>
-
-        <View style={cameraStyles.progressRow}>
-          <Text style={cameraStyles.progressLabel}>Progress</Text>
-          <View style={cameraStyles.progressTrack}>
-            <View style={[cameraStyles.progressFill, { width: `${displayedProgress}%` }]} />
-          </View>
-          <Text style={cameraStyles.progressNumber}>{displayedProgress}%</Text>
-        </View>
+        ) : null}
 
         {status === "uploading" || uploadProgress > 0 ? (
           <View style={cameraStyles.progressRow}>
@@ -897,6 +1317,26 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         ) : null}
 
         {coachingResults.analyzedFrames > 0 ? (
+          <CoachReviewPanel
+            review={coachReview}
+            reviewLevel={reviewLevel}
+            onReviewLevelChange={setReviewLevel}
+            miniGoalsEnabled={miniGoalsEnabled}
+            onMiniGoalsToggle={setMiniGoalsEnabled}
+            score={coachingResults.averageScore}
+            classification={coachingResults.classification}
+          />
+        ) : null}
+
+        {selectedModeId === "shooting_form" && reviewShotEvents.length > 0 ? (
+          <ShotReviewPanel shotEvents={reviewShotEvents} reviewLevel={reviewLevel} />
+        ) : null}
+
+        {selectedModeId !== "shooting_form" && modeReview ? (
+          <ModeReviewPanel review={modeReview} reviewLevel={reviewLevel} miniGoalsEnabled={miniGoalsEnabled} />
+        ) : null}
+
+        {reviewLevel === "intermediate" && coachingResults.analyzedFrames > 0 ? (
           <View style={cameraStyles.explanationPanel}>
             <Text style={cameraStyles.clipLabel}>Why This Score</Text>
             {scoreExplanation.map((item) => (
@@ -908,7 +1348,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           </View>
         ) : null}
 
-        {coachingResults.dominantFeedback.length > 0 ? (
+        {reviewLevel === "intermediate" && coachingResults.dominantFeedback.length > 0 ? (
           <View style={cameraStyles.focusPanel}>
             <Text style={cameraStyles.clipLabel}>Top Focus Areas</Text>
             {coachingResults.dominantFeedback.map((item, index) => (
@@ -919,7 +1359,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           </View>
         ) : null}
 
-        {coachingResults.summary ? <Text style={cameraStyles.summaryText}>{coachingResults.summary}</Text> : null}
+        {reviewLevel === "intermediate" && coachingResults.summary ? <Text style={cameraStyles.summaryText}>{coachingResults.summary}</Text> : null}
         {errorMessage ? <Text style={cameraStyles.errorText}>{errorMessage}</Text> : null}
         {archiveMessage ? (
           <Text style={[cameraStyles.archiveText, archiveMessageTone === "success" ? { color: colors.success } : { color: colors.warning }]}>
@@ -930,33 +1370,182 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         {resultVideoUrl ? (
           <>
             <View style={cameraStyles.resultVideoFrame}>
-              <ResultVideoPlayer videoUrl={resultVideoUrl} />
+              <ResultVideoPlayer videoUrl={resultVideoUrl} reviewEvents={reviewMoments} />
             </View>
             <PrimaryButton title="Download Video" onPress={openResultVideo} />
           </>
         ) : null}
-      </ScrollView>
+          </ScrollView>
+        ) : null}
+      </View>
     </View>
   );
 }
 
-function CameraIconButton({ icon, onPress, disabled = false, active = false, badge, accessibilityLabel }) {
+function SetupGuidePanel({ guide }) {
   return (
-    <TouchableOpacity
-      activeOpacity={0.9}
-      accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel}
-      onPress={onPress}
-      disabled={disabled}
-      style={[cameraStyles.railButton, active && cameraStyles.railButtonActive, disabled && cameraStyles.disabledControl]}
-    >
-      <Feather name={icon} size={21} color={active ? "#091220" : colors.text} />
-      {badge ? <Text style={[cameraStyles.railBadge, active && cameraStyles.railBadgeActive]}>{badge}</Text> : null}
-    </TouchableOpacity>
+    <View style={cameraStyles.setupGuidePanel}>
+      <View style={cameraStyles.setupGuideHeader}>
+        <Feather name="target" size={16} color={colors.primary} />
+        <Text style={cameraStyles.clipLabel}>{guide.title}</Text>
+      </View>
+      {guide.tips.map((tip) => (
+        <View key={tip} style={cameraStyles.setupTipRow}>
+          <View style={cameraStyles.setupTipDot} />
+          <Text style={cameraStyles.setupTipText}>{tip}</Text>
+        </View>
+      ))}
+    </View>
   );
 }
 
-function ResultVideoPlayer({ videoUrl }) {
+function CoachReviewPanel({
+  review,
+  reviewLevel,
+  onReviewLevelChange,
+  miniGoalsEnabled,
+  onMiniGoalsToggle,
+  score,
+  classification,
+}) {
+  return (
+    <View style={cameraStyles.coachReviewPanel}>
+      <View style={cameraStyles.reviewHeaderRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={cameraStyles.clipLabel}>Coach Review</Text>
+          <Text style={cameraStyles.reviewTitle}>Main Focus</Text>
+        </View>
+        <View style={[cameraStyles.trackingPill, { borderColor: review.tracking.color }]}>
+          <Text style={[cameraStyles.trackingPillText, { color: review.tracking.color }]}>
+            {review.tracking.label} Tracking
+          </Text>
+        </View>
+      </View>
+      <View style={cameraStyles.reviewLevelSelector}>
+        {REVIEW_LEVELS.map((level) => {
+          const active = reviewLevel === level.id;
+          return (
+            <TouchableOpacity
+              key={level.id}
+              activeOpacity={0.9}
+              onPress={() => {
+                hapticSelection();
+                onReviewLevelChange(level.id);
+              }}
+              style={[cameraStyles.reviewLevelButton, active && cameraStyles.reviewLevelButtonActive]}
+            >
+              <Text style={[cameraStyles.reviewLevelText, active && cameraStyles.reviewLevelTextActive]}>{level.title}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+      <Text style={cameraStyles.reviewMainText}>{review.mainFocus}</Text>
+      {review.tracking.label !== "Good" ? (
+        <View style={[cameraStyles.trackingWarning, { borderColor: review.tracking.color }]}>
+          <Feather name="alert-triangle" size={15} color={review.tracking.color} />
+          <Text style={cameraStyles.trackingWarningText}>{review.tracking.text}</Text>
+        </View>
+      ) : null}
+      <View style={cameraStyles.reviewInfoRow}>
+        <View style={cameraStyles.reviewInfoItem}>
+          <Text style={cameraStyles.reviewInfoLabel}>Skill Score</Text>
+          <Text style={cameraStyles.reviewInfoValue}>{Number(score || 0).toFixed(1)}</Text>
+          <Text style={cameraStyles.reviewInfoHelp}>{classification || "Review"}</Text>
+        </View>
+        <View style={cameraStyles.reviewInfoItem}>
+          <Text style={cameraStyles.reviewInfoLabel}>Tracking Quality</Text>
+          <Text style={[cameraStyles.reviewInfoValue, { color: review.tracking.color }]}>{review.tracking.label}</Text>
+          <Text style={cameraStyles.reviewInfoHelp}>{review.tracking.text}</Text>
+        </View>
+      </View>
+      <Text style={cameraStyles.reviewCoachText}>
+        {reviewLevel === "intermediate"
+          ? "Intermediate view adds the score breakdown and full focus list below."
+          : review.scoreText}
+      </Text>
+      <View style={cameraStyles.miniGoalToggleRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={cameraStyles.miniGoalTitle}>Mini Goals</Text>
+          <Text style={cameraStyles.miniGoalCopy}>Show one next drill after each review.</Text>
+        </View>
+        <Switch
+          value={miniGoalsEnabled}
+          onValueChange={(value) => {
+            hapticSelection();
+            onMiniGoalsToggle(value);
+          }}
+          thumbColor={colors.text}
+          trackColor={{ false: colors.track, true: colors.primary }}
+        />
+      </View>
+      {miniGoalsEnabled ? <Text style={cameraStyles.nextDrillText}>{review.nextDrill}</Text> : null}
+    </View>
+  );
+}
+
+function ShotReviewPanel({ shotEvents, reviewLevel }) {
+  return (
+    <View style={cameraStyles.shotReviewPanel}>
+      <Text style={cameraStyles.clipLabel}>Shot-By-Shot Review</Text>
+      <Text style={cameraStyles.shotReviewIntro}>
+        {reviewLevel === "intermediate"
+          ? "Use each shot to compare setup, release, ball path, and landing."
+          : "Use these cards while watching the annotated video."}
+      </Text>
+      <View style={cameraStyles.shotReviewGrid}>
+        {shotEvents.map((event) => {
+          const resultColor = shotResultColor(event.result);
+          const resultTime = event.resultTimestampSeconds ?? event.timestampSeconds;
+          return (
+            <View
+              key={`${event.shotNumber}-${event.timestampSeconds}`}
+              style={[cameraStyles.shotReviewCard, { borderColor: resultColor }]}
+            >
+              <View style={cameraStyles.shotReviewHeader}>
+                <Text style={cameraStyles.shotReviewTitle}>Shot {event.shotNumber}</Text>
+                <Text style={[cameraStyles.shotReviewResult, { color: resultColor }]}>{formatShotResult(event.result)}</Text>
+              </View>
+              <Text style={cameraStyles.shotReviewTime}>{formatShotTime(resultTime)}</Text>
+              <Text style={cameraStyles.shotReviewText}>{shotFeedbackText(event.result, reviewLevel)}</Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+function ModeReviewPanel({ review, reviewLevel, miniGoalsEnabled }) {
+  return (
+    <View style={cameraStyles.modeReviewPanel}>
+      <View style={cameraStyles.modeReviewHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={cameraStyles.clipLabel}>{review.title}</Text>
+          <Text style={cameraStyles.modeReviewIntro}>{review.intro}</Text>
+        </View>
+        <View style={cameraStyles.modeActionCount}>
+          <Text style={cameraStyles.modeActionValue}>{review.actionValue}</Text>
+          <Text style={cameraStyles.modeActionLabel}>{review.actionLabel}</Text>
+        </View>
+      </View>
+      <View style={cameraStyles.modeReviewGrid}>
+        {review.sections.map((section) => (
+          <View key={section.label} style={[cameraStyles.modeReviewCard, { borderColor: section.color }]}>
+            <Text style={cameraStyles.modeReviewLabel}>{section.label}</Text>
+            <Text style={[cameraStyles.modeReviewStatus, { color: section.color }]}>{section.status}</Text>
+            <Text style={cameraStyles.modeReviewTip}>{section.tip}</Text>
+          </View>
+        ))}
+      </View>
+      <Text style={cameraStyles.modeReviewCue}>
+        {reviewLevel === "intermediate" ? review.intermediateCue : review.beginnerCue}
+      </Text>
+      {miniGoalsEnabled ? <Text style={cameraStyles.nextDrillText}>{review.nextDrill}</Text> : null}
+    </View>
+  );
+}
+
+function ResultVideoPlayer({ videoUrl, reviewEvents = [] }) {
   const player = useVideoPlayer(
     {
       uri: videoUrl,
@@ -968,6 +1557,13 @@ function ResultVideoPlayer({ videoUrl }) {
     }
   );
   const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
+  const videoMoments = Array.isArray(reviewEvents) ? reviewEvents : [];
+
+  function jumpToMoment(event) {
+    hapticSelection();
+    player.currentTime = Number(event.reviewSeconds || 0);
+    player.play();
+  }
 
   return (
     <View>
@@ -1002,6 +1598,31 @@ function ResultVideoPlayer({ videoUrl }) {
             {isPlaying ? "Pause Preview" : "Play Preview"}
           </Text>
         </TouchableOpacity>
+        {videoMoments.length > 0 ? (
+          <View style={cameraStyles.videoShotJumpPanel}>
+            <Text style={cameraStyles.clipLabel}>Jump To Review</Text>
+            <View style={cameraStyles.videoShotJumpRow}>
+              {videoMoments.map((event, index) => {
+                const resultColor = shotResultColor(event.result);
+                const momentLabel = event.label || `Shot ${event.shotNumber || index + 1}`;
+                const resultTime = event.resultTimestampSeconds ?? event.timestampSeconds;
+                return (
+                  <TouchableOpacity
+                    key={`${momentLabel}-${event.reviewSeconds ?? index}`}
+                    activeOpacity={0.85}
+                    onPress={() => jumpToMoment(event)}
+                    style={[cameraStyles.videoShotJumpButton, { borderColor: resultColor }]}
+                  >
+                    <Text style={cameraStyles.videoShotJumpTitle}>{momentLabel}</Text>
+                    <Text style={[cameraStyles.videoShotJumpMeta, { color: resultColor }]}>
+                      {formatShotResult(event.result)} {formatShotTime(resultTime)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -1022,8 +1643,7 @@ const cameraStyles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   cameraStage: {
-    height: "62%",
-    minHeight: 460,
+    minHeight: 280,
     backgroundColor: "#040b15",
     overflow: "hidden",
   },
@@ -1032,7 +1652,11 @@ const cameraStyles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 28,
+    paddingBottom: 112,
     backgroundColor: colors.backgroundSoft,
+  },
+  cameraFallbackCardDown: {
+    paddingBottom: 72,
   },
   cameraWarmupOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -1119,35 +1743,6 @@ const cameraStyles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "800",
   },
-  rightRail: {
-    position: "absolute",
-    top: 158,
-    right: 16,
-    gap: 12,
-  },
-  railButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.overlay,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  railButtonActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
-  },
-  railBadge: {
-    marginTop: 1,
-    color: colors.muted,
-    fontSize: 8,
-    fontWeight: "900",
-  },
-  railBadgeActive: {
-    color: "#091220",
-  },
   recordingPill: {
     position: "absolute",
     top: 100,
@@ -1166,10 +1761,31 @@ const cameraStyles = StyleSheet.create({
     position: "absolute",
     left: 14,
     right: 14,
-    bottom: 118,
     borderRadius: 24,
     padding: 16,
     backgroundColor: colors.cardElevated,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: "hidden",
+  },
+  menuHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  menuBody: {
+    flexShrink: 1,
+  },
+  menuBodyContent: {
+    paddingBottom: 2,
+  },
+  menuCloseButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.backgroundSoft,
     borderWidth: 1,
     borderColor: colors.border,
   },
@@ -1184,42 +1800,6 @@ const cameraStyles = StyleSheet.create({
     color: colors.text,
     fontSize: 20,
     fontWeight: "900",
-  },
-  modeGrid: {
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 12,
-  },
-  modeOption: {
-    flex: 1,
-    minHeight: 82,
-    borderRadius: 18,
-    padding: 12,
-    justifyContent: "space-between",
-    backgroundColor: colors.backgroundSoft,
-    borderWidth: 2,
-    borderColor: colors.border,
-  },
-  modeOptionActive: {
-    backgroundColor: "rgba(255, 122, 26, 0.14)",
-    borderColor: colors.primary,
-  },
-  modeOptionTag: {
-    color: colors.secondary,
-    fontSize: 10,
-    fontWeight: "900",
-    textTransform: "uppercase",
-  },
-  modeOptionTitle: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: "900",
-  },
-  overlayRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    marginTop: 10,
   },
   overlayPill: {
     borderRadius: 999,
@@ -1259,55 +1839,40 @@ const cameraStyles = StyleSheet.create({
     color: colors.muted,
     fontSize: 12,
   },
-  modeStrip: {
-    position: "absolute",
-    left: 14,
-    right: 14,
-    bottom: 116,
+  menuToolRow: {
     flexDirection: "row",
-    justifyContent: "center",
+    flexWrap: "wrap",
     gap: 8,
+    marginTop: 10,
   },
-  modeChip: {
-    minWidth: 92,
+  menuToolButton: {
+    flexGrow: 1,
+    minWidth: 104,
+    minHeight: 42,
     borderRadius: 999,
     borderWidth: 1,
     borderColor: colors.border,
-    backgroundColor: colors.overlay,
+    backgroundColor: colors.backgroundSoft,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
   },
-  modeChipActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
-  },
-  modeChipText: {
+  menuToolText: {
     color: colors.text,
     fontSize: 11,
     fontWeight: "900",
-  },
-  modeChipTextActive: {
-    color: "#091220",
   },
   captureTray: {
     position: "absolute",
     left: 22,
     right: 22,
     bottom: 22,
+    height: 82,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-  },
-  trayButton: {
-    width: 54,
-    height: 54,
-    borderRadius: 27,
-    alignItems: "center",
     justifyContent: "center",
-    backgroundColor: colors.overlay,
-    borderWidth: 1,
-    borderColor: colors.border,
   },
   recordButton: {
     width: 82,
@@ -1333,51 +1898,66 @@ const cameraStyles = StyleSheet.create({
     height: 32,
     borderRadius: 8,
   },
-  analyzeButton: {
-    minWidth: 96,
-    height: 54,
-    borderRadius: 27,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 7,
-    backgroundColor: colors.primary,
-    paddingHorizontal: 14,
-  },
-  analyzeButtonText: {
-    color: "#091220",
-    fontSize: 13,
-    fontWeight: "900",
-  },
   disabledControl: {
     opacity: 0.45,
   },
   sessionSheet: {
     flex: 1,
     backgroundColor: colors.background,
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    marginTop: -20,
+    marginHorizontal: 8,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    borderColor: colors.border,
+    boxShadow: "0 -12px 28px rgba(0, 0, 0, 0.30)",
+    overflow: "hidden",
+  },
+  sessionSheetCollapsed: {
+    flex: 0,
+  },
+  sessionSheetExpanded: {
+    marginHorizontal: 0,
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
-    marginTop: -18,
-    borderTopWidth: 1,
-    borderColor: colors.border,
+  },
+  sessionSheetBody: {
+    flex: 1,
   },
   sessionSheetContent: {
     paddingHorizontal: 18,
-    paddingTop: 12,
+    paddingTop: 8,
     paddingBottom: 32,
+  },
+  sheetDragHeader: {
+    paddingHorizontal: 18,
+    paddingTop: 14,
+    paddingBottom: 10,
+  },
+  sheetDragHeaderCollapsed: {
+    paddingTop: 12,
+    paddingBottom: 8,
   },
   sheetHandle: {
     alignSelf: "center",
-    width: 42,
+    width: 56,
     height: 5,
     borderRadius: 999,
-    backgroundColor: colors.border,
-    marginBottom: 14,
+    backgroundColor: "rgba(247, 251, 255, 0.28)",
+    marginBottom: 12,
   },
-  sessionHeaderRow: {
+  sheetHandleCollapsed: {
+    marginBottom: 10,
+  },
+  modeTrayHeader: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     gap: 14,
+    paddingBottom: 8,
+  },
+  modeTrayHeaderCollapsed: {
+    paddingBottom: 0,
   },
   sheetEyebrow: {
     color: colors.primary,
@@ -1397,19 +1977,61 @@ const cameraStyles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 19,
   },
-  statusChip: {
-    borderRadius: 999,
-    backgroundColor: "rgba(255, 122, 26, 0.14)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 122, 26, 0.34)",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+  sheetCopyCollapsed: {
+    marginTop: 4,
   },
-  statusChipText: {
-    color: colors.primary,
-    fontSize: 11,
+  bottomModeGrid: {
+    flexDirection: "row",
+    gap: 8,
+    paddingTop: 8,
+    paddingBottom: 8,
+  },
+  bottomModeOption: {
+    flex: 1,
+    minHeight: 62,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.cardElevated,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 8,
+  },
+  bottomModeOptionActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  bottomModeTag: {
+    color: colors.secondary,
+    fontSize: 9,
     fontWeight: "900",
     textTransform: "uppercase",
+  },
+  bottomModeTitle: {
+    marginTop: 4,
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  bottomModeTextActive: {
+    color: "#091220",
+  },
+  bottomTrayLabel: {
+    marginTop: 6,
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  bottomOutputRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 8,
+    paddingBottom: 8,
+  },
+  sessionStatusRow: {
+    paddingTop: 4,
   },
   clipPanel: {
     marginTop: 16,
@@ -1451,6 +2073,356 @@ const cameraStyles = StyleSheet.create({
   backendStatusText: {
     fontSize: 12,
     fontWeight: "800",
+  },
+  setupGuidePanel: {
+    marginTop: 14,
+    borderRadius: 16,
+    padding: 13,
+    backgroundColor: "rgba(255, 122, 26, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 122, 26, 0.24)",
+  },
+  setupGuideHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  setupTipRow: {
+    marginTop: 8,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  setupTipDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    marginTop: 7,
+    backgroundColor: colors.primary,
+  },
+  setupTipText: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: "700",
+  },
+  coachReviewPanel: {
+    marginTop: 16,
+    borderRadius: 18,
+    padding: 14,
+    backgroundColor: colors.cardElevated,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  reviewHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  reviewTitle: {
+    marginTop: 4,
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: "900",
+  },
+  trackingPill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "rgba(7, 17, 31, 0.34)",
+  },
+  trackingPillText: {
+    fontSize: 10,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  reviewLevelSelector: {
+    marginTop: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+    flexDirection: "row",
+    padding: 4,
+    gap: 4,
+  },
+  reviewLevelButton: {
+    flex: 1,
+    minHeight: 36,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
+  },
+  reviewLevelButtonActive: {
+    backgroundColor: colors.primary,
+  },
+  reviewLevelText: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  reviewLevelTextActive: {
+    color: "#091220",
+  },
+  reviewMainText: {
+    marginTop: 10,
+    color: colors.text,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "800",
+  },
+  trackingWarning: {
+    marginTop: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+    backgroundColor: "rgba(255, 209, 102, 0.1)",
+    padding: 10,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  trackingWarningText: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: "800",
+  },
+  reviewInfoRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 12,
+  },
+  reviewInfoItem: {
+    flex: 1,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+    padding: 12,
+  },
+  reviewInfoLabel: {
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  reviewInfoValue: {
+    marginTop: 5,
+    color: colors.text,
+    fontSize: 20,
+    fontWeight: "900",
+  },
+  reviewInfoHelp: {
+    marginTop: 4,
+    color: colors.muted,
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  reviewCoachText: {
+    marginTop: 12,
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  miniGoalToggleRow: {
+    marginTop: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  miniGoalTitle: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  miniGoalCopy: {
+    marginTop: 3,
+    color: colors.muted,
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  nextDrillText: {
+    marginTop: 8,
+    color: colors.secondary,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: "800",
+  },
+  shotReviewPanel: {
+    marginTop: 16,
+    borderRadius: 18,
+    padding: 14,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  shotReviewIntro: {
+    marginTop: 6,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  shotReviewGrid: {
+    marginTop: 12,
+    gap: 10,
+  },
+  shotReviewCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    backgroundColor: colors.cardElevated,
+    padding: 12,
+  },
+  shotReviewHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  shotReviewTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  shotReviewResult: {
+    fontSize: 12,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  shotReviewTime: {
+    marginTop: 4,
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  shotReviewText: {
+    marginTop: 8,
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  modeReviewPanel: {
+    marginTop: 16,
+    borderRadius: 18,
+    padding: 14,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  modeReviewHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  modeReviewIntro: {
+    marginTop: 6,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  modeActionCount: {
+    minWidth: 92,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.cardElevated,
+    padding: 10,
+    alignItems: "center",
+  },
+  modeActionValue: {
+    color: colors.primary,
+    fontSize: 24,
+    fontWeight: "900",
+  },
+  modeActionLabel: {
+    marginTop: 3,
+    color: colors.muted,
+    fontSize: 9,
+    lineHeight: 13,
+    textAlign: "center",
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  modeReviewGrid: {
+    marginTop: 12,
+    gap: 10,
+  },
+  modeReviewCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    backgroundColor: colors.cardElevated,
+    padding: 12,
+  },
+  modeReviewLabel: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  modeReviewStatus: {
+    marginTop: 4,
+    fontSize: 12,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  modeReviewTip: {
+    marginTop: 8,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  modeReviewCue: {
+    marginTop: 12,
+    color: colors.text,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: "800",
+  },
+  sheetActionRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 12,
+  },
+  sheetSecondaryAction: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.cardElevated,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+  },
+  sheetSecondaryActionText: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  sheetPrimaryAction: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+  },
+  sheetPrimaryActionText: {
+    color: "#091220",
+    fontSize: 13,
+    fontWeight: "900",
   },
   progressRow: {
     flexDirection: "row",
@@ -1608,5 +2580,35 @@ const cameraStyles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: "#040b15",
+  },
+  videoShotJumpPanel: {
+    marginTop: 14,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  videoShotJumpRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  videoShotJumpButton: {
+    minWidth: 102,
+    borderRadius: 14,
+    borderWidth: 1,
+    backgroundColor: "rgba(7, 17, 31, 0.36)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  videoShotJumpTitle: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  videoShotJumpMeta: {
+    marginTop: 3,
+    fontSize: 11,
+    fontWeight: "800",
   },
 });

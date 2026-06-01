@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -26,10 +27,25 @@ MAX_VIDEO_SECONDS = 180
 TEST_MODE_SECONDS = 15
 SHOT_COOLDOWN_SECONDS = 1.2
 MAKE_COOLDOWN_SECONDS = 1.6
+POST_MAKE_SHOT_SUPPRESSION_SECONDS = 0.45
 MAKE_BANNER_SECONDS = 1.0
 ATTEMPT_CONFIRMATION_FRAMES = 2
-ATTEMPT_RESULT_WINDOW_SECONDS = 3.2
+ATTEMPT_RESULT_WINDOW_SECONDS = 3.0
+ACTIVE_ATTEMPT_ROLLOVER_SECONDS = 1.4
 RECENT_SHOT_SIGNAL_SECONDS = 0.9
+RECENT_BASKET_MEMORY_SECONDS = 0.6
+RECENT_RIM_SEQUENCE_SECONDS = 0.75
+DIRECT_MAKE_CONFIRMATION_FRAMES = 2
+SINGLE_FRAME_HOOP_BALL_CONFIDENCE = 0.65
+RECENT_DIRECT_MAKE_SECONDS = 0.35
+RECENT_BASKET_PASS_SECONDS = 0.6
+BASKET_OVERLAP_CONFIRMATION_FRAMES = 2
+SUSTAINED_BASKET_OVERLAP_FRAMES = 4
+RECENT_BASKET_OVERLAP_SECONDS = 0.35
+RECENT_PRE_ATTEMPT_MAKE_SECONDS = 1.25
+LATE_MAKE_RECOVERY_SECONDS = 2.0
+POST_MISS_GHOST_ATTEMPT_SECONDS = 0.75
+PENDING_ATTEMPT_FINALIZE_SECONDS = 0.75
 SHOT_TRAINING_CONFIDENCE_OVERRIDES = {
     "player_shooting": 0.62,
     "ball_in_basket": 0.25,
@@ -282,17 +298,51 @@ class ShotTrainingTracker:
         self.last_shot_signal_frame = -10_000
         self.last_basket_center: Optional[tuple[int, int]] = None
         self.last_basket_radius = 0.0
+        self.last_basket_detection: Optional[Dict[str, float | str]] = None
+        self.last_basket_frame = -10_000
         self.banner_text = "Ready to analyze."
         self.banner_until_frame = -1
         self.pending_shot_streak = 0
         self.active_attempt_frame: Optional[int] = None
+        self.active_attempt_event_index: Optional[int] = None
         self.awaiting_shot_reset = False
+        self.direct_make_detection_active = False
+        self.direct_make_streak = 0
+        self.recent_direct_make_frames: deque[int] = deque(maxlen=8)
         self.shot_cooldown_frames = max(1, int(self.fps * SHOT_COOLDOWN_SECONDS))
         self.make_cooldown_frames = max(1, int(self.fps * MAKE_COOLDOWN_SECONDS))
+        self.post_make_shot_suppression_frames = max(
+            2,
+            int(self.fps * POST_MAKE_SHOT_SUPPRESSION_SECONDS),
+        )
         self.banner_duration_frames = max(10, int(self.fps * MAKE_BANNER_SECONDS))
         self.attempt_confirmation_frames = max(1, ATTEMPT_CONFIRMATION_FRAMES)
         self.attempt_result_window_frames = max(10, int(self.fps * ATTEMPT_RESULT_WINDOW_SECONDS))
+        self.active_attempt_rollover_frames = max(4, int(self.fps * ACTIVE_ATTEMPT_ROLLOVER_SECONDS))
         self.recent_shot_signal_frames = max(3, int(self.fps * RECENT_SHOT_SIGNAL_SECONDS))
+        self.recent_basket_memory_frames = max(3, int(self.fps * RECENT_BASKET_MEMORY_SECONDS))
+        self.recent_rim_sequence_frames = max(4, int(self.fps * RECENT_RIM_SEQUENCE_SECONDS))
+        self.recent_direct_make_frames_window = max(3, int(self.fps * RECENT_DIRECT_MAKE_SECONDS))
+        self.recent_basket_pass_frames = max(4, int(self.fps * RECENT_BASKET_PASS_SECONDS))
+        self.recent_basket_overlap_frames_window = max(3, int(self.fps * RECENT_BASKET_OVERLAP_SECONDS))
+        self.recent_pre_attempt_make_frames = max(4, int(self.fps * RECENT_PRE_ATTEMPT_MAKE_SECONDS))
+        self.late_make_recovery_frames = max(4, int(self.fps * LATE_MAKE_RECOVERY_SECONDS))
+        self.post_miss_ghost_attempt_frames = max(4, int(self.fps * POST_MISS_GHOST_ATTEMPT_SECONDS))
+        self.pending_attempt_finalize_frames = max(4, int(self.fps * PENDING_ATTEMPT_FINALIZE_SECONDS))
+        self.recent_ball_positions: deque[tuple[int, tuple[int, int]]] = deque(
+            maxlen=max(6, self.recent_rim_sequence_frames * 2)
+        )
+        self.recent_basket_overlap_frames: deque[int] = deque(maxlen=8)
+        self.basket_overlap_streak = 0
+        self.last_pre_attempt_make_frame = -10_000
+        self.last_hoop_only_make_frame = -10_000
+        self.last_miss_frame = -10_000
+        self.last_miss_event_index: Optional[int] = None
+        self.last_miss_can_recover = False
+        self.last_miss_recovery_keeps_active = False
+        self.last_rim_entry_frame = -10_000
+        self.last_basket_pass_frame = -10_000
+        self.shot_events: list[dict[str, object]] = []
 
     @property
     def misses(self) -> int:
@@ -312,11 +362,16 @@ class ShotTrainingTracker:
             "accuracy": self.accuracy,
         }
 
+    def to_shot_events(self) -> list[dict[str, object]]:
+        return [event.copy() for event in self.shot_events]
+
     def observe(self, detections: list[Dict[str, float | str]], frame_index: int) -> None:
         basket_detection = _best_detection(detections, "basket")
         if basket_detection:
             self.last_basket_center = _detection_center(basket_detection)
             self.last_basket_radius = _basket_make_radius(basket_detection)
+            self.last_basket_detection = basket_detection.copy()
+            self.last_basket_frame = frame_index
 
         shot_detection = _best_detection(detections, "player_shooting")
         if shot_detection:
@@ -329,29 +384,148 @@ class ShotTrainingTracker:
             self.pending_shot_streak = 0
             self.awaiting_shot_reset = False
 
+        direct_make_detection = _best_detection(detections, "ball_in_basket")
+        basket_context = basket_detection or self._recent_basket_detection(frame_index)
+        ball_detection = _best_ball_detection(detections, basket_context)
+        direct_make_valid = _valid_direct_make_detection(direct_make_detection, basket_context)
+        if direct_make_valid:
+            self.direct_make_streak += 1
+            self.recent_direct_make_frames.append(frame_index)
+            self.last_rim_entry_frame = frame_index
+        else:
+            self.direct_make_streak = 0
+        self._prune_direct_make_frames(frame_index)
+        direct_make_confirmed = self._direct_make_is_confirmed(frame_index)
+        single_frame_hoop_make = (
+            direct_make_valid
+            and basket_context is not None
+            and ball_detection is not None
+            and float(ball_detection.get("confidence", 0.0)) >= SINGLE_FRAME_HOOP_BALL_CONFIDENCE
+            and _ball_overlaps_basket_core(ball_detection, basket_context)
+        )
+
+        ball_overlaps_basket_core = False
+        tracked_ball = ball_detection or direct_make_detection
+        if tracked_ball is not None:
+            ball_center = _detection_center(tracked_ball)
+            self.recent_ball_positions.append((frame_index, ball_center))
+            if basket_context is not None and _ball_enters_rim(
+                ball_center,
+                basket_context,
+                recent_ball_positions=self.recent_ball_positions,
+                recent_frame_window=self.recent_rim_sequence_frames,
+            ):
+                self.last_rim_entry_frame = frame_index
+            if (
+                basket_context is not None
+                and self._recent_rim_entry(frame_index)
+                and _ball_under_basket(ball_center, basket_context)
+            ):
+                self.last_basket_pass_frame = frame_index
+            if (
+                basket_context is not None
+                and ball_detection is not None
+                and _ball_overlaps_basket_core(ball_detection, basket_context)
+            ):
+                ball_overlaps_basket_core = True
+                self.recent_basket_overlap_frames.append(frame_index)
+        self.basket_overlap_streak = self.basket_overlap_streak + 1 if ball_overlaps_basket_core else 0
+        self._prune_basket_overlap_frames(frame_index)
+
+        can_score_make = frame_index - self.last_make_frame >= self.make_cooldown_frames
+        basket_overlap_confirmed = self._basket_overlap_is_confirmed(frame_index)
+        sustained_basket_overlap_confirmed = self.basket_overlap_streak >= SUSTAINED_BASKET_OVERLAP_FRAMES
+        ball_under_basket = (
+            basket_context is not None
+            and ball_detection is not None
+            and _ball_under_basket(_detection_center(ball_detection), basket_context)
+        )
+        basket_overlap_pass_confirmed = basket_overlap_confirmed and (
+            self._recent_basket_pass(frame_index) or ball_under_basket
+        )
+        shot_release_evidence = (
+            basket_context is not None
+            and ball_detection is not None
+            and self._recent_shot_signal(frame_index)
+            and _ball_above_rim(_detection_center(ball_detection), basket_context)
+        )
+        current_hoop_make_evidence = (
+            direct_make_confirmed
+            or basket_overlap_pass_confirmed
+            or sustained_basket_overlap_confirmed
+            or single_frame_hoop_make
+            or self._recent_basket_pass(frame_index)
+        )
+
+        if self._should_rollover_active_attempt(frame_index) and not current_hoop_make_evidence:
+            self._resolve_attempt(
+                frame_index,
+                made=False,
+                banner_text="Miss recorded",
+                recovery_keeps_active=True,
+            )
+            self._start_attempt(frame_index, "Shot attempt detected")
+
         if (
             self.active_attempt_frame is None
-            and self.pending_shot_streak >= self.attempt_confirmation_frames
+            and not current_hoop_make_evidence
+            and (self.pending_shot_streak >= self.attempt_confirmation_frames or shot_release_evidence)
+            and shot_release_evidence
             and frame_index - self.last_attempt_frame >= self.shot_cooldown_frames
+            and not self._recent_make_duplicate_shot(frame_index)
+            and frame_index - self.last_hoop_only_make_frame >= self.make_cooldown_frames
         ):
             self._start_attempt(frame_index, "Shot attempt detected")
             self.pending_shot_streak = 0
 
-        make_detection = _best_detection(detections, "ball_in_basket") or _infer_make_detection(
-            detections,
-            basket_detection=basket_detection,
-            last_basket_center=self.last_basket_center,
-            last_basket_radius=self.last_basket_radius,
-        )
-        if make_detection and frame_index - self.last_make_frame >= self.make_cooldown_frames:
-            if self.active_attempt_frame is None and self._recent_shot_signal(frame_index):
-                self._start_attempt(frame_index, "Shot attempt inferred")
-            if self.active_attempt_frame is not None:
-                self.makes += 1
-                self.last_make_frame = frame_index
-                self._resolve_attempt(frame_index, made=True, banner_text="Made basket detected")
-                if self.last_basket_center is None:
-                    self.last_basket_center = _detection_center(make_detection)
+        if (
+            can_score_make
+            and self.active_attempt_frame is None
+            and (
+                basket_overlap_pass_confirmed
+                or sustained_basket_overlap_confirmed
+                or self._recent_basket_pass(frame_index)
+            )
+        ):
+            self.last_pre_attempt_make_frame = frame_index
+            self.last_hoop_only_make_frame = frame_index
+            self._start_attempt(frame_index, "Made basket detected")
+
+        if (
+            can_score_make
+            and self.active_attempt_frame is None
+            and direct_make_valid
+            and (direct_make_confirmed or single_frame_hoop_make)
+        ):
+            self.last_pre_attempt_make_frame = frame_index
+            self.last_hoop_only_make_frame = frame_index
+            self._start_attempt(frame_index, "Made basket detected")
+
+        recovered_late_make = False
+        if can_score_make and (
+            direct_make_confirmed
+            or self._recent_basket_pass(frame_index)
+            or basket_overlap_pass_confirmed
+            or sustained_basket_overlap_confirmed
+        ):
+            recovered_late_make = self._recover_recent_miss_as_make(frame_index)
+
+        if (
+            can_score_make
+            and not recovered_late_make
+            and self.active_attempt_frame is not None
+            and (
+                direct_make_confirmed
+                or self._recent_basket_pass(frame_index)
+                or basket_overlap_pass_confirmed
+                or sustained_basket_overlap_confirmed
+                or self._recent_pre_attempt_make(frame_index)
+            )
+        ):
+            self.makes += 1
+            self.last_make_frame = frame_index
+            self._resolve_attempt(frame_index, made=True, banner_text="Made basket detected")
+        self.direct_make_detection_active = direct_make_detection is not None
 
         if (
             self.active_attempt_frame is not None
@@ -369,21 +543,199 @@ class ShotTrainingTracker:
     def _recent_shot_signal(self, frame_index: int) -> bool:
         return frame_index - self.last_shot_signal_frame <= self.recent_shot_signal_frames
 
+    def _recent_basket_detection(self, frame_index: int) -> Optional[Dict[str, float | str]]:
+        if (
+            self.last_basket_detection is None
+            or frame_index - self.last_basket_frame > self.recent_basket_memory_frames
+        ):
+            return None
+        return self.last_basket_detection
+
+    def _recent_rim_entry(self, frame_index: int) -> bool:
+        return frame_index - self.last_rim_entry_frame <= self.recent_rim_sequence_frames
+
+    def _recent_basket_pass(self, frame_index: int) -> bool:
+        return frame_index - self.last_basket_pass_frame <= self.recent_basket_pass_frames
+
+    def _direct_make_is_confirmed(self, frame_index: int) -> bool:
+        self._prune_direct_make_frames(frame_index)
+        return len(self.recent_direct_make_frames) >= DIRECT_MAKE_CONFIRMATION_FRAMES
+
+    def _prune_direct_make_frames(self, frame_index: int) -> None:
+        while (
+            self.recent_direct_make_frames
+            and frame_index - self.recent_direct_make_frames[0] > self.recent_direct_make_frames_window
+        ):
+            self.recent_direct_make_frames.popleft()
+
+    def _basket_overlap_is_confirmed(self, frame_index: int) -> bool:
+        self._prune_basket_overlap_frames(frame_index)
+        return len(self.recent_basket_overlap_frames) >= BASKET_OVERLAP_CONFIRMATION_FRAMES
+
+    def _recent_pre_attempt_make(self, frame_index: int) -> bool:
+        return frame_index - self.last_pre_attempt_make_frame <= self.recent_pre_attempt_make_frames
+
+    def _recent_make_duplicate_shot(self, frame_index: int) -> bool:
+        return frame_index - self.last_make_frame < self.post_make_shot_suppression_frames
+
+    def _should_rollover_active_attempt(self, frame_index: int) -> bool:
+        if self.active_attempt_frame is None:
+            return False
+        if self.pending_shot_streak < self.attempt_confirmation_frames:
+            return False
+        if frame_index - self.active_attempt_frame < self.active_attempt_rollover_frames:
+            return False
+        if frame_index - self.last_attempt_frame < self.shot_cooldown_frames:
+            return False
+        if self._recent_rim_entry(frame_index) or self._recent_basket_pass(frame_index):
+            return False
+        return True
+
+    def _recover_recent_miss_as_make(self, frame_index: int) -> bool:
+        if (
+            self.misses <= 0
+            or not self.last_miss_can_recover
+            or frame_index - self.last_miss_frame > self.late_make_recovery_frames
+        ):
+            return False
+        if (
+            self.active_attempt_frame is not None
+            and self.active_attempt_frame - self.last_miss_frame > self.post_miss_ghost_attempt_frames
+        ):
+            return False
+
+        recovery_keeps_active = self.last_miss_recovery_keeps_active
+        drop_active_event = self.active_attempt_frame is not None and not recovery_keeps_active
+
+        self._misses -= 1
+        if drop_active_event:
+            self.attempts = max(0, self.attempts - 1)
+        self.makes += 1
+        self.last_make_frame = frame_index
+        self.last_miss_frame = -10_000
+        self.last_miss_can_recover = False
+        self.last_miss_recovery_keeps_active = False
+        self.pending_shot_streak = 0
+        if self.last_miss_event_index is not None and 0 <= self.last_miss_event_index < len(self.shot_events):
+            self.shot_events[self.last_miss_event_index].update(
+                {
+                    "result": "make",
+                    "result_frame": frame_index,
+                    "result_timestamp_seconds": round(frame_index / self.fps, 2),
+                }
+            )
+        if drop_active_event:
+            if self.active_attempt_event_index is not None:
+                self._remove_shot_event(self.active_attempt_event_index)
+            self.active_attempt_event_index = None
+            self.active_attempt_frame = None
+        self.recent_basket_overlap_frames.clear()
+        self.basket_overlap_streak = 0
+        self.last_pre_attempt_make_frame = -10_000
+        self.last_hoop_only_make_frame = frame_index
+        self.last_rim_entry_frame = -10_000
+        self.last_basket_pass_frame = -10_000
+        self.last_miss_event_index = None
+        self._set_banner("Made basket detected", frame_index)
+        return True
+
+    def _prune_basket_overlap_frames(self, frame_index: int) -> None:
+        while (
+            self.recent_basket_overlap_frames
+            and frame_index - self.recent_basket_overlap_frames[0] > self.recent_basket_overlap_frames_window
+        ):
+            self.recent_basket_overlap_frames.popleft()
+
     def _start_attempt(self, frame_index: int, banner_text: str) -> None:
         self.attempts += 1
         self.last_attempt_frame = frame_index
         self.active_attempt_frame = frame_index
+        self.active_attempt_event_index = len(self.shot_events)
+        self.shot_events.append(
+            {
+                "shot_number": self.attempts,
+                "result": "pending",
+                "start_frame": frame_index,
+                "timestamp_seconds": round(frame_index / self.fps, 2),
+            }
+        )
         self.awaiting_shot_reset = True
+        self.recent_basket_overlap_frames.clear()
+        self.basket_overlap_streak = 0
+        self.last_rim_entry_frame = -10_000
+        self.last_basket_pass_frame = -10_000
         self._set_banner(banner_text, frame_index)
 
-    def _resolve_attempt(self, frame_index: int, made: bool, banner_text: str) -> None:
+    def _resolve_attempt(
+        self,
+        frame_index: int,
+        made: bool,
+        banner_text: str,
+        *,
+        allow_late_recovery: bool = True,
+        recovery_keeps_active: bool = False,
+    ) -> None:
         if self.active_attempt_frame is None:
             return
+        event_index = self.active_attempt_event_index
+        if event_index is not None and 0 <= event_index < len(self.shot_events):
+            self.shot_events[event_index].update(
+                {
+                    "result": "make" if made else "miss",
+                    "result_frame": frame_index,
+                    "result_timestamp_seconds": round(frame_index / self.fps, 2),
+                }
+            )
         if not made:
             self._misses += 1
+            self.last_miss_frame = frame_index
+            self.last_miss_event_index = event_index
+            self.last_miss_can_recover = allow_late_recovery
+            self.last_miss_recovery_keeps_active = recovery_keeps_active
+        else:
+            self.last_miss_event_index = None
         self.active_attempt_frame = None
+        self.active_attempt_event_index = None
         self.pending_shot_streak = 0
+        self.recent_basket_overlap_frames.clear()
+        self.basket_overlap_streak = 0
+        self.last_pre_attempt_make_frame = -10_000
+        self.last_rim_entry_frame = -10_000
+        self.last_basket_pass_frame = -10_000
         self._set_banner(banner_text, frame_index)
+
+    def discard_pending_attempt(self) -> None:
+        if self.active_attempt_frame is None:
+            return
+        self.attempts = max(0, self.attempts - 1)
+        if self.active_attempt_event_index is not None:
+            self._remove_shot_event(self.active_attempt_event_index)
+        self.active_attempt_frame = None
+        self.active_attempt_event_index = None
+        self.pending_shot_streak = 0
+        self.recent_basket_overlap_frames.clear()
+        self.basket_overlap_streak = 0
+        self.last_pre_attempt_make_frame = -10_000
+        self.last_rim_entry_frame = -10_000
+        self.last_basket_pass_frame = -10_000
+
+    def finalize_pending_attempt(self, final_frame_index: int) -> None:
+        if self.active_attempt_frame is None:
+            return
+        if final_frame_index - self.active_attempt_frame >= self.pending_attempt_finalize_frames:
+            self._resolve_attempt(final_frame_index, made=False, banner_text="Miss recorded")
+            return
+        self.discard_pending_attempt()
+
+    def _remove_shot_event(self, event_index: int) -> None:
+        if 0 <= event_index < len(self.shot_events):
+            self.shot_events.pop(event_index)
+            self._renumber_shot_events()
+        self.last_miss_event_index = None
+
+    def _renumber_shot_events(self) -> None:
+        for index, event in enumerate(self.shot_events, start=1):
+            event["shot_number"] = index
 
 
 class ShotTrainingJob:
@@ -455,6 +807,7 @@ class ShotTrainingJob:
                 total_frames=max_frames,
                 progress_percentage=0,
                 stats=tracker.to_stats(),
+                shot_events=tracker.to_shot_events(),
             )
 
             frame_index = 0
@@ -495,6 +848,7 @@ class ShotTrainingJob:
                         total_frames=max_frames,
                         progress_percentage=int((frame_index / max(max_frames, 1)) * 100),
                         stats=tracker.to_stats(),
+                        shot_events=tracker.to_shot_events(),
                     )
 
                 if frame_index >= max_frames:
@@ -513,6 +867,7 @@ class ShotTrainingJob:
 
             writer.close()
             writer = None
+            tracker.finalize_pending_attempt(frame_index)
 
             classification = classify_score(tracker.accuracy)
             warning = _shot_training_validity_warning(
@@ -537,6 +892,10 @@ class ShotTrainingJob:
                     "score": tracker.accuracy,
                     "classification": classification,
                     "summary": summary,
+                    "action_count": tracker.attempts,
+                    "action_label": "Shots",
+                    "shooting_stats": tracker.to_stats(),
+                    "shot_events": tracker.to_shot_events(),
                     "source_type": "shot_training_video",
                     "user_key": self.user_key,
                 }
@@ -549,6 +908,7 @@ class ShotTrainingJob:
                 total_frames=max(frame_index, max_frames),
                 progress_percentage=100,
                 stats=tracker.to_stats(),
+                shot_events=tracker.to_shot_events(),
                 summary=summary,
                 classification=classification,
             )
@@ -615,6 +975,7 @@ def start_shot_training_job(
             "total_frames": 0,
             "progress_percentage": 0,
             "stats": {"attempts": 0, "makes": 0, "misses": 0, "accuracy": 0.0},
+            "shot_events": [],
             "classification": None,
             "summary": None,
             "error_message": None,
@@ -649,6 +1010,7 @@ def get_shot_training_status(file_id: str) -> dict[str, object]:
                 "total_frames": 0,
                 "progress_percentage": 0,
                 "stats": {"attempts": 0, "makes": 0, "misses": 0, "accuracy": 0.0},
+                "shot_events": [],
                 "classification": None,
                 "summary": None,
                 "error_message": None,
@@ -705,6 +1067,181 @@ def _best_detection(
     return max(matching, key=lambda item: float(item.get("confidence", 0.0)))
 
 
+def _best_ball_detection(
+    detections: list[Dict[str, float | str]],
+    basket_detection: Optional[Dict[str, float | str]],
+) -> Optional[Dict[str, float | str]]:
+    matching = [item for item in detections if item.get("label") == "ball"]
+    if not matching:
+        return None
+    if basket_detection is None:
+        return max(matching, key=lambda item: float(item.get("confidence", 0.0)))
+
+    basket_center = _detection_center(basket_detection)
+    basket_width = abs(float(basket_detection["x2"]) - float(basket_detection["x1"]))
+    basket_height = abs(float(basket_detection["y2"]) - float(basket_detection["y1"]))
+    basket_scale = max(1.0, basket_width, basket_height)
+
+    def score(item: Dict[str, float | str]) -> float:
+        center = _detection_center(item)
+        distance = _point_distance(center, basket_center)
+        confidence = float(item.get("confidence", 0.0))
+        return distance / basket_scale - confidence * 0.20
+
+    return min(matching, key=score)
+
+
+def _valid_direct_make_detection(
+    direct_make_detection: Optional[Dict[str, float | str]],
+    basket_detection: Optional[Dict[str, float | str]],
+) -> bool:
+    if direct_make_detection is None or basket_detection is None:
+        return False
+    return _detection_overlaps_basket_area(direct_make_detection, basket_detection)
+
+
+def _detection_overlaps_basket_area(
+    detection: Dict[str, float | str],
+    basket_detection: Dict[str, float | str],
+) -> bool:
+    basket_x1 = float(basket_detection["x1"])
+    basket_y1 = float(basket_detection["y1"])
+    basket_x2 = float(basket_detection["x2"])
+    basket_y2 = float(basket_detection["y2"])
+    basket_width = max(1.0, basket_x2 - basket_x1)
+    basket_height = max(1.0, basket_y2 - basket_y1)
+    expanded_basket = {
+        "x1": basket_x1 - basket_width * 0.20,
+        "y1": basket_y1 - basket_height * 0.20,
+        "x2": basket_x2 + basket_width * 0.20,
+        "y2": basket_y2 + basket_height * 0.45,
+    }
+    detection_x1 = float(detection["x1"])
+    detection_y1 = float(detection["y1"])
+    detection_x2 = float(detection["x2"])
+    detection_y2 = float(detection["y2"])
+    overlaps = not (
+        detection_x2 < expanded_basket["x1"]
+        or detection_x1 > expanded_basket["x2"]
+        or detection_y2 < expanded_basket["y1"]
+        or detection_y1 > expanded_basket["y2"]
+    )
+    if overlaps:
+        return True
+
+    detection_center = _detection_center(detection)
+    return (
+        expanded_basket["x1"] <= detection_center[0] <= expanded_basket["x2"]
+        and expanded_basket["y1"] <= detection_center[1] <= expanded_basket["y2"]
+    )
+
+
+def _ball_overlaps_basket_core(
+    ball_detection: Dict[str, float | str],
+    basket_detection: Dict[str, float | str],
+) -> bool:
+    overlap_area = _intersection_area(ball_detection, basket_detection)
+    ball_area = _detection_area(ball_detection)
+    if ball_area <= 0:
+        return False
+    return overlap_area / ball_area >= 0.18
+
+
+def _intersection_area(
+    first: Dict[str, float | str],
+    second: Dict[str, float | str],
+) -> float:
+    x1 = max(float(first["x1"]), float(second["x1"]))
+    y1 = max(float(first["y1"]), float(second["y1"]))
+    x2 = min(float(first["x2"]), float(second["x2"]))
+    y2 = min(float(first["y2"]), float(second["y2"]))
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def _detection_area(detection: Dict[str, float | str]) -> float:
+    return max(0.0, float(detection["x2"]) - float(detection["x1"])) * max(
+        0.0,
+        float(detection["y2"]) - float(detection["y1"]),
+    )
+
+
+def _ball_enters_rim(
+    ball_center: tuple[int, int],
+    basket_detection: Dict[str, float | str],
+    *,
+    recent_ball_positions: deque[tuple[int, tuple[int, int]]],
+    recent_frame_window: int,
+) -> bool:
+    if not _ball_in_rim_window(ball_center, basket_detection):
+        return False
+    return _has_recent_ball_above_rim(
+        basket_detection,
+        recent_ball_positions=recent_ball_positions,
+        current_frame=recent_ball_positions[-1][0],
+        recent_frame_window=recent_frame_window,
+    )
+
+
+def _has_recent_ball_above_rim(
+    basket_detection: Dict[str, float | str],
+    *,
+    recent_ball_positions: deque[tuple[int, tuple[int, int]]],
+    current_frame: int,
+    recent_frame_window: int,
+) -> bool:
+    for sample_frame, sample_center in reversed(recent_ball_positions):
+        if current_frame - sample_frame > recent_frame_window:
+            break
+        if _ball_above_rim(sample_center, basket_detection):
+            return True
+    return False
+
+
+def _ball_in_rim_window(ball_center: tuple[int, int], basket_detection: Dict[str, float | str]) -> bool:
+    rim_zone = _rim_zone(basket_detection)
+    return (
+        rim_zone["inner_x1"] <= ball_center[0] <= rim_zone["inner_x2"]
+        and rim_zone["entry_y1"] <= ball_center[1] <= rim_zone["entry_y2"]
+    )
+
+
+def _ball_above_rim(ball_center: tuple[int, int], basket_detection: Dict[str, float | str]) -> bool:
+    rim_zone = _rim_zone(basket_detection)
+    return (
+        rim_zone["outer_x1"] <= ball_center[0] <= rim_zone["outer_x2"]
+        and ball_center[1] < rim_zone["entry_y1"]
+    )
+
+
+def _ball_under_basket(ball_center: tuple[int, int], basket_detection: Dict[str, float | str]) -> bool:
+    rim_zone = _rim_zone(basket_detection)
+    return (
+        rim_zone["under_x1"] <= ball_center[0] <= rim_zone["under_x2"]
+        and rim_zone["under_y1"] <= ball_center[1] <= rim_zone["under_y2"]
+    )
+
+
+def _rim_zone(basket_detection: Dict[str, float | str]) -> dict[str, float]:
+    basket_x1 = float(basket_detection["x1"])
+    basket_y1 = float(basket_detection["y1"])
+    basket_x2 = float(basket_detection["x2"])
+    basket_y2 = float(basket_detection["y2"])
+    basket_width = max(1.0, basket_x2 - basket_x1)
+    basket_height = max(1.0, basket_y2 - basket_y1)
+    return {
+        "inner_x1": basket_x1 + basket_width * 0.24,
+        "inner_x2": basket_x2 - basket_width * 0.24,
+        "outer_x1": basket_x1 + basket_width * 0.10,
+        "outer_x2": basket_x2 - basket_width * 0.10,
+        "entry_y1": basket_y1 + basket_height * 0.10,
+        "entry_y2": basket_y1 + basket_height * 0.58,
+        "under_x1": basket_x1 - basket_width * 0.25,
+        "under_x2": basket_x2 + basket_width * 0.25,
+        "under_y1": basket_y1 + basket_height * 0.72,
+        "under_y2": basket_y2 + basket_height * 1.60,
+    }
+
+
 def _infer_make_detection(
     detections: list[Dict[str, float | str]],
     *,
@@ -716,7 +1253,7 @@ def _infer_make_detection(
     if ball_detection is None:
         return None
 
-    if basket_detection is not None and _ball_overlaps_basket(ball_detection, basket_detection):
+    if basket_detection is not None and _ball_in_rim_window(_detection_center(ball_detection), basket_detection):
         inferred = ball_detection.copy()
         inferred["label"] = "ball_in_basket"
         inferred["display_label"] = "Ball In Basket"
@@ -724,7 +1261,7 @@ def _infer_make_detection(
 
     if last_basket_center is not None and last_basket_radius > 0:
         ball_center = _detection_center(ball_detection)
-        if _point_distance(ball_center, last_basket_center) <= last_basket_radius:
+        if _point_distance(ball_center, last_basket_center) <= max(18.0, last_basket_radius * 0.4):
             inferred = ball_detection.copy()
             inferred["label"] = "ball_in_basket"
             inferred["display_label"] = "Ball In Basket"
@@ -734,30 +1271,13 @@ def _infer_make_detection(
 
 
 def _ball_overlaps_basket(ball_detection: Dict[str, float | str], basket_detection: Dict[str, float | str]) -> bool:
-    basket_x1 = float(basket_detection["x1"])
-    basket_y1 = float(basket_detection["y1"])
-    basket_x2 = float(basket_detection["x2"])
-    basket_y2 = float(basket_detection["y2"])
-    basket_width = max(1.0, basket_x2 - basket_x1)
-    basket_height = max(1.0, basket_y2 - basket_y1)
-
-    expanded_basket = {
-        "x1": basket_x1 - basket_width * 0.35,
-        "y1": basket_y1 - basket_height * 0.45,
-        "x2": basket_x2 + basket_width * 0.35,
-        "y2": basket_y2 + basket_height * 0.75,
-    }
-    ball_center = _detection_center(ball_detection)
-    return (
-        expanded_basket["x1"] <= ball_center[0] <= expanded_basket["x2"]
-        and expanded_basket["y1"] <= ball_center[1] <= expanded_basket["y2"]
-    )
+    return _ball_in_rim_window(_detection_center(ball_detection), basket_detection)
 
 
 def _basket_make_radius(basket_detection: Dict[str, float | str]) -> float:
     width = abs(float(basket_detection["x2"]) - float(basket_detection["x1"]))
     height = abs(float(basket_detection["y2"]) - float(basket_detection["y1"]))
-    return max(18.0, max(width, height) * 0.8)
+    return max(18.0, max(width, height) * 0.35)
 
 
 def _point_distance(first: tuple[int, int], second: tuple[int, int]) -> float:
