@@ -205,14 +205,16 @@ function normalizeShotEvents(events) {
       const timestampSeconds = numericOrNull(source.timestampSeconds ?? source.timestamp_seconds);
       const resultTimestampSeconds = numericOrNull(source.resultTimestampSeconds ?? source.result_timestamp_seconds);
       const reviewStartSeconds = timestampSeconds ?? resultTimestampSeconds ?? 0;
+      const evidence = Array.isArray(source.evidence) ? source.evidence.filter(Boolean) : [];
       return {
         shotNumber: Number(source.shotNumber ?? source.shot_number ?? index + 1) || index + 1,
         result: String(source.result || "pending").toLowerCase(),
         timestampSeconds: reviewStartSeconds,
         resultTimestampSeconds,
         reviewSeconds: Math.max(0, reviewStartSeconds - 1),
-        confidence: numericOrNull(source.confidence ?? source.score_confidence ?? source.result_confidence),
         reason: source.reason || source.review_reason || source.result_reason || "",
+        resultQuality: String(source.resultQuality || source.result_quality || "").toLowerCase(),
+        evidence,
       };
     })
     .sort((a, b) => a.shotNumber - b.shotNumber);
@@ -243,6 +245,20 @@ function shotResultColor(result) {
   if (result === "make") return colors.success;
   if (result === "miss") return colors.warning;
   return colors.secondary;
+}
+
+function resultQualityColor(quality) {
+  if (quality === "high") return colors.success;
+  if (quality === "medium") return colors.warning;
+  if (quality === "low") return colors.danger;
+  return colors.secondary;
+}
+
+function formatResultQuality(quality) {
+  if (quality === "high") return "High";
+  if (quality === "medium") return "Medium";
+  if (quality === "low") return "Low";
+  return "Review";
 }
 
 function shotFeedbackText(result, reviewLevel = "beginner") {
@@ -1673,9 +1689,24 @@ function ShotReviewPanel({ shotEvents, reviewLevel }) {
               <Text style={cameraStyles.shotReviewTime}>{formatShotTime(resultTime)}</Text>
               <View style={cameraStyles.shotReviewMetaRow}>
                 <Text style={cameraStyles.shotReviewMetaPill}>Jump: {formatShotTime(event.reviewSeconds)}</Text>
+                {event.resultQuality ? (
+                  <Text style={[cameraStyles.shotReviewMetaPill, { color: resultQualityColor(event.resultQuality) }]}>
+                    Quality: {formatResultQuality(event.resultQuality)}
+                  </Text>
+                ) : null}
               </View>
               <Text style={cameraStyles.shotReviewText}>{shotFeedbackText(event.result, reviewLevel)}</Text>
               <Text style={cameraStyles.shotReviewReason}>{shotReasonText(event, reviewLevel)}</Text>
+              {event.evidence.length ? (
+                <View style={cameraStyles.shotEvidenceList}>
+                  {event.evidence.slice(0, 3).map((item) => (
+                    <View key={`${event.shotNumber}-${item}`} style={cameraStyles.shotEvidenceRow}>
+                      <View style={cameraStyles.shotEvidenceDot} />
+                      <Text style={cameraStyles.shotEvidenceText}>{item}</Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
             </View>
           );
         })}
@@ -2652,6 +2683,29 @@ const cameraStyles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
     fontWeight: "800",
+  },
+  shotEvidenceList: {
+    marginTop: 8,
+    gap: 6,
+  },
+  shotEvidenceRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 7,
+  },
+  shotEvidenceDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    marginTop: 6,
+    backgroundColor: colors.secondary,
+  },
+  shotEvidenceText: {
+    flex: 1,
+    color: colors.muted,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: "700",
   },
   modeReviewPanel: {
     marginTop: 16,

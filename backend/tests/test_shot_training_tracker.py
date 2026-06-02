@@ -31,6 +31,10 @@ def direct_make_in_rim_detection():
     return [{"label": "ball_in_basket", "confidence": 0.9, "x1": 102, "y1": 92, "x2": 118, "y2": 108}]
 
 
+def make_detection():
+    return basket_detection() + direct_make_in_rim_detection()
+
+
 def ball_overlapping_basket_core_detection():
     return ball_detection(104, 94, 126, 116)
 
@@ -135,6 +139,11 @@ class ShotTrainingTrackerTests(unittest.TestCase):
             tracker.to_stats(),
             {"attempts": 1, "makes": 0, "misses": 1, "accuracy": 0.0},
         )
+        event = tracker.to_shot_events()[0]
+        self.assertEqual(event["result"], "miss")
+        self.assertEqual(event["result_quality"], "low")
+        self.assertIn("no confirmed ball-through-hoop result", event["evidence"])
+        self.assertIn("Counted as a miss", event["result_reason"])
 
     def test_setup_pose_clusters_before_release_do_not_start_attempts(self):
         tracker = ShotTrainingTracker(30)
@@ -201,6 +210,10 @@ class ShotTrainingTrackerTests(unittest.TestCase):
             tracker.to_stats(),
             {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
         )
+        event = tracker.to_shot_events()[0]
+        self.assertEqual(event["result_quality"], "high")
+        self.assertIn("recent ball path under basket", event["evidence"])
+        self.assertIn("tracked below the basket", event["result_reason"])
 
     def test_ball_under_basket_without_rim_entry_does_not_count(self):
         tracker = ShotTrainingTracker(30)

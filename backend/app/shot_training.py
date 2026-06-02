@@ -363,7 +363,12 @@ class ShotTrainingTracker:
         }
 
     def to_shot_events(self) -> list[dict[str, object]]:
-        return [event.copy() for event in self.shot_events]
+        events: list[dict[str, object]] = []
+        for event in self.shot_events:
+            item = event.copy()
+            item["evidence"] = list(item.get("evidence") or [])
+            events.append(item)
+        return events
 
     def observe(self, detections: list[Dict[str, float | str]], frame_index: int) -> None:
         basket_detection = _best_detection(detections, "basket")
@@ -456,15 +461,40 @@ class ShotTrainingTracker:
             or single_frame_hoop_make
             or self._recent_basket_pass(frame_index)
         )
+        attempt_evidence = _attempt_evidence(
+            shot_signal=self._recent_shot_signal(frame_index),
+            basket_visible=basket_context is not None,
+            ball_visible=ball_detection is not None,
+            release_seen=shot_release_evidence,
+        )
+        make_evidence = _make_evidence(
+            direct_make_confirmed=direct_make_confirmed,
+            basket_overlap_pass_confirmed=basket_overlap_pass_confirmed,
+            sustained_basket_overlap_confirmed=sustained_basket_overlap_confirmed,
+            single_frame_hoop_make=single_frame_hoop_make,
+            recent_basket_pass=self._recent_basket_pass(frame_index),
+            recent_pre_attempt_make=self._recent_pre_attempt_make(frame_index),
+            basket_visible=basket_context is not None,
+            ball_visible=ball_detection is not None or direct_make_detection is not None,
+        )
 
         if self._should_rollover_active_attempt(frame_index) and not current_hoop_make_evidence:
+            miss_evidence = _miss_evidence(
+                "new shot started before prior result",
+                basket_visible=basket_context is not None,
+                ball_visible=ball_detection is not None,
+                shot_signal=True,
+            )
             self._resolve_attempt(
                 frame_index,
                 made=False,
                 banner_text="Miss recorded",
                 recovery_keeps_active=True,
+                evidence=miss_evidence,
+                result_reason=_shot_result_reason(False, miss_evidence),
+                result_quality=_shot_result_quality(False, miss_evidence),
             )
-            self._start_attempt(frame_index, "Shot attempt detected")
+            self._start_attempt(frame_index, "Shot attempt detected", evidence=attempt_evidence)
 
         if (
             self.active_attempt_frame is None
@@ -475,7 +505,7 @@ class ShotTrainingTracker:
             and not self._recent_make_duplicate_shot(frame_index)
             and frame_index - self.last_hoop_only_make_frame >= self.make_cooldown_frames
         ):
-            self._start_attempt(frame_index, "Shot attempt detected")
+            self._start_attempt(frame_index, "Shot attempt detected", evidence=attempt_evidence)
             self.pending_shot_streak = 0
 
         if (
@@ -489,7 +519,7 @@ class ShotTrainingTracker:
         ):
             self.last_pre_attempt_make_frame = frame_index
             self.last_hoop_only_make_frame = frame_index
-            self._start_attempt(frame_index, "Made basket detected")
+            self._start_attempt(frame_index, "Made basket detected", evidence=_unique_evidence(["hoop result detected before shooting pose"] + make_evidence))
 
         if (
             can_score_make
@@ -499,7 +529,7 @@ class ShotTrainingTracker:
         ):
             self.last_pre_attempt_make_frame = frame_index
             self.last_hoop_only_make_frame = frame_index
-            self._start_attempt(frame_index, "Made basket detected")
+            self._start_attempt(frame_index, "Made basket detected", evidence=_unique_evidence(["hoop result detected before shooting pose"] + make_evidence))
 
         recovered_late_make = False
         if can_score_make and (
@@ -508,7 +538,7 @@ class ShotTrainingTracker:
             or basket_overlap_pass_confirmed
             or sustained_basket_overlap_confirmed
         ):
-            recovered_late_make = self._recover_recent_miss_as_make(frame_index)
+            recovered_late_make = self._recover_recent_miss_as_make(frame_index, evidence=make_evidence)
 
         if (
             can_score_make
@@ -524,14 +554,34 @@ class ShotTrainingTracker:
         ):
             self.makes += 1
             self.last_make_frame = frame_index
-            self._resolve_attempt(frame_index, made=True, banner_text="Made basket detected")
+            self._resolve_attempt(
+                frame_index,
+                made=True,
+                banner_text="Made basket detected",
+                evidence=make_evidence,
+                result_reason=_shot_result_reason(True, make_evidence),
+                result_quality=_shot_result_quality(True, make_evidence),
+            )
         self.direct_make_detection_active = direct_make_detection is not None
 
         if (
             self.active_attempt_frame is not None
             and frame_index - self.active_attempt_frame >= self.attempt_result_window_frames
         ):
-            self._resolve_attempt(frame_index, made=False, banner_text="Miss recorded")
+            miss_evidence = _miss_evidence(
+                "result window expired",
+                basket_visible=basket_context is not None,
+                ball_visible=ball_detection is not None,
+                shot_signal=self._recent_shot_signal(frame_index),
+            )
+            self._resolve_attempt(
+                frame_index,
+                made=False,
+                banner_text="Miss recorded",
+                evidence=miss_evidence,
+                result_reason=_shot_result_reason(False, miss_evidence),
+                result_quality=_shot_result_quality(False, miss_evidence),
+            )
 
     def _set_banner(self, text: str, frame_index: int) -> None:
         self.banner_text = text
@@ -591,7 +641,7 @@ class ShotTrainingTracker:
             return False
         return True
 
-    def _recover_recent_miss_as_make(self, frame_index: int) -> bool:
+    def _recover_recent_miss_as_make(self, frame_index: int, *, evidence: Optional[list[str]] = None) -> bool:
         if (
             self.misses <= 0
             or not self.last_miss_can_recover
@@ -616,12 +666,18 @@ class ShotTrainingTracker:
         self.last_miss_can_recover = False
         self.last_miss_recovery_keeps_active = False
         self.pending_shot_streak = 0
+        recovery_evidence = _unique_evidence(["late make recovered after rim bounce"] + list(evidence or []))
         if self.last_miss_event_index is not None and 0 <= self.last_miss_event_index < len(self.shot_events):
+            existing_evidence = list(self.shot_events[self.last_miss_event_index].get("evidence") or [])
+            combined_evidence = _unique_evidence(existing_evidence + recovery_evidence)
             self.shot_events[self.last_miss_event_index].update(
                 {
                     "result": "make",
                     "result_frame": frame_index,
                     "result_timestamp_seconds": round(frame_index / self.fps, 2),
+                    "result_quality": _shot_result_quality(True, combined_evidence),
+                    "result_reason": _shot_result_reason(True, combined_evidence),
+                    "evidence": combined_evidence,
                 }
             )
         if drop_active_event:
@@ -646,17 +702,21 @@ class ShotTrainingTracker:
         ):
             self.recent_basket_overlap_frames.popleft()
 
-    def _start_attempt(self, frame_index: int, banner_text: str) -> None:
+    def _start_attempt(self, frame_index: int, banner_text: str, *, evidence: Optional[list[str]] = None) -> None:
         self.attempts += 1
         self.last_attempt_frame = frame_index
         self.active_attempt_frame = frame_index
         self.active_attempt_event_index = len(self.shot_events)
+        attempt_evidence = _unique_evidence(evidence or [])
         self.shot_events.append(
             {
                 "shot_number": self.attempts,
                 "result": "pending",
                 "start_frame": frame_index,
                 "timestamp_seconds": round(frame_index / self.fps, 2),
+                "result_quality": None,
+                "result_reason": "Attempt detected; waiting for hoop result.",
+                "evidence": attempt_evidence,
             }
         )
         self.awaiting_shot_reset = True
@@ -674,16 +734,24 @@ class ShotTrainingTracker:
         *,
         allow_late_recovery: bool = True,
         recovery_keeps_active: bool = False,
+        evidence: Optional[list[str]] = None,
+        result_reason: Optional[str] = None,
+        result_quality: Optional[str] = None,
     ) -> None:
         if self.active_attempt_frame is None:
             return
         event_index = self.active_attempt_event_index
         if event_index is not None and 0 <= event_index < len(self.shot_events):
+            existing_evidence = list(self.shot_events[event_index].get("evidence") or [])
+            combined_evidence = _unique_evidence(existing_evidence + list(evidence or []))
             self.shot_events[event_index].update(
                 {
                     "result": "make" if made else "miss",
                     "result_frame": frame_index,
                     "result_timestamp_seconds": round(frame_index / self.fps, 2),
+                    "result_quality": result_quality or _shot_result_quality(made, combined_evidence),
+                    "result_reason": result_reason or _shot_result_reason(made, combined_evidence),
+                    "evidence": combined_evidence,
                 }
             )
         if not made:
@@ -723,7 +791,15 @@ class ShotTrainingTracker:
         if self.active_attempt_frame is None:
             return
         if final_frame_index - self.active_attempt_frame >= self.pending_attempt_finalize_frames:
-            self._resolve_attempt(final_frame_index, made=False, banner_text="Miss recorded")
+            evidence = _miss_evidence("clip ended before clear hoop result")
+            self._resolve_attempt(
+                final_frame_index,
+                made=False,
+                banner_text="Miss recorded",
+                evidence=evidence,
+                result_reason=_shot_result_reason(False, evidence),
+                result_quality=_shot_result_quality(False, evidence),
+            )
             return
         self.discard_pending_attempt()
 
@@ -736,6 +812,143 @@ class ShotTrainingTracker:
     def _renumber_shot_events(self) -> None:
         for index, event in enumerate(self.shot_events, start=1):
             event["shot_number"] = index
+
+
+def _unique_evidence(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _attempt_evidence(
+    *,
+    shot_signal: bool,
+    basket_visible: bool,
+    ball_visible: bool,
+    release_seen: bool,
+) -> list[str]:
+    evidence: list[str] = []
+    if shot_signal:
+        evidence.append("shooting motion detected")
+    if basket_visible:
+        evidence.append("basket visible")
+    if ball_visible:
+        evidence.append("ball visible")
+    if release_seen:
+        evidence.append("ball above rim at release")
+    return _unique_evidence(evidence)
+
+
+def _make_evidence(
+    *,
+    direct_make_confirmed: bool,
+    basket_overlap_pass_confirmed: bool,
+    sustained_basket_overlap_confirmed: bool,
+    single_frame_hoop_make: bool,
+    recent_basket_pass: bool,
+    recent_pre_attempt_make: bool,
+    basket_visible: bool,
+    ball_visible: bool,
+) -> list[str]:
+    evidence: list[str] = []
+    if basket_visible:
+        evidence.append("basket visible")
+    if ball_visible:
+        evidence.append("ball visible")
+    if direct_make_confirmed:
+        evidence.append("ball-in-basket confirmed across frames")
+    if basket_overlap_pass_confirmed:
+        evidence.append("ball entered hoop and passed below rim")
+    if sustained_basket_overlap_confirmed:
+        evidence.append("ball overlapped basket core across frames")
+    if single_frame_hoop_make:
+        evidence.append("single-frame hoop confirmation")
+    if recent_basket_pass:
+        evidence.append("recent ball path under basket")
+    if recent_pre_attempt_make:
+        evidence.append("recent hoop result before attempt")
+    return _unique_evidence(evidence)
+
+
+def _miss_evidence(
+    reason: str,
+    *,
+    basket_visible: bool = False,
+    ball_visible: bool = False,
+    shot_signal: bool = False,
+) -> list[str]:
+    evidence = [reason]
+    if shot_signal:
+        evidence.append("shooting motion detected")
+    if basket_visible:
+        evidence.append("basket visible")
+    if ball_visible:
+        evidence.append("ball visible")
+    evidence.append("no confirmed ball-through-hoop result")
+    return _unique_evidence(evidence)
+
+
+def _shot_result_quality(made: bool, evidence: list[str]) -> str:
+    evidence_set = set(evidence)
+    if made:
+        if (
+            "ball entered hoop and passed below rim" in evidence_set
+            and (
+                "ball-in-basket confirmed across frames" in evidence_set
+                or "recent ball path under basket" in evidence_set
+            )
+        ):
+            return "high"
+        if (
+            "recent ball path under basket" in evidence_set
+            and "basket visible" in evidence_set
+            and "ball visible" in evidence_set
+        ):
+            return "high"
+        if (
+            "ball-in-basket confirmed across frames" in evidence_set
+            or "ball overlapped basket core across frames" in evidence_set
+            or "recent ball path under basket" in evidence_set
+        ):
+            return "medium"
+        return "low"
+
+    if (
+        "result window expired" in evidence_set
+        and "shooting motion detected" in evidence_set
+        and "basket visible" in evidence_set
+    ):
+        return "medium"
+    return "low"
+
+
+def _shot_result_reason(made: bool, evidence: list[str]) -> str:
+    evidence_set = set(evidence)
+    if made:
+        if "late make recovered after rim bounce" in evidence_set:
+            return "Recovered as a make because a late hoop result appeared after the miss window."
+        if "ball entered hoop and passed below rim" in evidence_set:
+            return "Counted as a make because the ball entered the hoop area and continued below the rim."
+        if "recent ball path under basket" in evidence_set:
+            return "Counted as a make because the ball was tracked below the basket after rim entry."
+        if "ball-in-basket confirmed across frames" in evidence_set:
+            return "Counted as a make because the ball-in-basket detection was confirmed across frames."
+        if "ball overlapped basket core across frames" in evidence_set:
+            return "Counted as a make because the ball stayed inside the basket core across frames."
+        if "single-frame hoop confirmation" in evidence_set:
+            return "Counted as a make from a single clear hoop confirmation with the ball inside the rim."
+        return "Counted as a make from available hoop-entry evidence."
+
+    if "new shot started before prior result" in evidence_set:
+        return "Counted as a miss because a new shot started before the previous attempt had a confirmed hoop result."
+    if "clip ended before clear hoop result" in evidence_set:
+        return "Counted as a miss because the clip ended before a clear hoop result was confirmed."
+    return "Counted as a miss because the result window ended without confirmed ball-through-hoop evidence."
 
 
 class ShotTrainingJob:

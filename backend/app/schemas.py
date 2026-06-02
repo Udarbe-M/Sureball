@@ -135,6 +135,9 @@ class ShotEvent(BaseModel):
     start_frame: int = 0
     result_timestamp_seconds: Optional[float] = None
     result_frame: Optional[int] = None
+    result_quality: Optional[str] = None
+    result_reason: Optional[str] = None
+    evidence: List[str] = Field(default_factory=list)
 
 
 class ShotTrainingStartResponse(BaseModel):
