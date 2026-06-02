@@ -4,9 +4,11 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
 import { VideoView, useVideoPlayer } from "expo-video";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Linking, PanResponder, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
+import { Image, Linking, PanResponder, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
+import BrandMark from "../components/BrandMark";
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
+import { getModeGuide } from "../data/modeGuides";
 import {
   buildCoachingVideoDownloadUrl,
   cancelCoachingVideoAnalysis,
@@ -25,18 +27,27 @@ const MODES = [
     title: "Shooting",
     tag: "Shot",
     description: "Review elbow line, knee load, ball release, and balance.",
+    guideLabel: "Shooting Form",
+    guideHint: "Elbow, base, release",
+    guideIcon: "target",
   },
   {
     id: "dribbling",
     title: "Dribbling",
     tag: "Handle",
     description: "Track low handle control, ball-to-hand connection, stance, and balance.",
+    guideLabel: "Dribble Control",
+    guideHint: "Stance, height, rhythm",
+    guideIcon: "activity",
   },
   {
     id: "passing",
     title: "Passing",
     tag: "Pass",
     description: "Check passing line, hand-to-ball connection, release window, and body control.",
+    guideLabel: "Passing Line",
+    guideHint: "Step, release, finish",
+    guideIcon: "send",
   },
 ];
 
@@ -65,33 +76,6 @@ const REVIEW_LEVELS = [
 
 const COLLAPSED_SHEET_HEIGHT_ESTIMATE = 108;
 const SHEET_TOP_OVERLAP = 20;
-
-const MODE_SETUP_GUIDES = {
-  shooting_form: {
-    title: "Shooting Setup",
-    tips: [
-      "Keep the player, ball, hoop, and landing visible.",
-      "Use a side or front angle with the full body in frame.",
-      "Avoid zooming during the release and hoop entry.",
-    ],
-  },
-  dribbling: {
-    title: "Dribbling Setup",
-    tips: [
-      "Show the full body, both hands, and the ball bounce.",
-      "Keep the phone far enough to see knees, hips, and feet.",
-      "Use steady lighting so fast ball movement stays visible.",
-    ],
-  },
-  passing: {
-    title: "Passing Setup",
-    tips: [
-      "Show hands, ball, chest, and target direction.",
-      "Use a side or front angle that catches the release.",
-      "Keep the body balanced in frame after the pass.",
-    ],
-  },
-};
 
 const INITIAL_COACHING_RESULTS = {
   analyzedFrames: 0,
@@ -143,8 +127,72 @@ function buildScoreExplanation({ activeMode, results }) {
   ];
 }
 
+function buildScoreReasons({ activeMode, results }) {
+  const reasons = [];
+  const score = Number(results.averageScore || 0);
+  const poseRate = Number(results.poseDetectionRate || 0);
+  const ballRate = Number(results.ballDetectionRate || 0);
+  const actionCount = Number(results.actionCount || 0);
+  const topCue = results.dominantFeedback?.[0];
+
+  if (poseRate < 70) {
+    reasons.push({
+      label: "Pose Visibility",
+      text: `Pose tracking was ${poseRate.toFixed(1)}%, so the body-form score may be lower than the real movement.`,
+      tone: "warning",
+    });
+  }
+
+  if (ballRate < 45) {
+    reasons.push({
+      label: "Ball Visibility",
+      text: `Ball tracking was ${ballRate.toFixed(1)}%, so action timing and shot review may miss some moments.`,
+      tone: "warning",
+    });
+  }
+
+  if (activeMode.id === "shooting_form") {
+    const attempts = Number(results.shootingStats?.attempts || 0);
+    const makes = Number(results.shootingStats?.makes || 0);
+    const accuracy = Number(results.shootingStats?.accuracy || 0);
+    if (attempts > 0) {
+      reasons.push({
+        label: "Shot Result",
+        text: `${makes}/${attempts} shots were counted as makes (${accuracy.toFixed(1)}%). Makes affect the shooting result, while form cues affect the technique score.`,
+        tone: accuracy >= 70 ? "good" : "warning",
+      });
+    } else {
+      reasons.push({
+        label: "Shot Result",
+        text: "No clear shot sequence was counted yet. Keep the player, ball, and hoop visible through release and hoop entry.",
+        tone: "warning",
+      });
+    }
+  } else if (actionCount > 0) {
+    reasons.push({
+      label: activeMode.id === "dribbling" ? "Dribbles Counted" : "Passes Counted",
+      text: `${actionCount} ${activeMode.id === "dribbling" ? "dribbles" : "passes"} were counted. Cleaner visibility and steadier rhythm usually improve the review.`,
+      tone: "good",
+    });
+  } else {
+    reasons.push({
+      label: "Action Count",
+      text: `No clear ${activeMode.id === "dribbling" ? "dribbles" : "passes"} were counted. Record with the ball, hands, and full body in frame.`,
+      tone: "warning",
+    });
+  }
+
+  reasons.push({
+    label: "Main Form Cue",
+    text: topCue || (score >= 75 ? "Strong form pattern. Repeat the same setup in the annotated video." : "No single cue dominated yet. Start with balance and visibility."),
+    tone: score >= 75 ? "good" : "neutral",
+  });
+
+  return reasons.slice(0, 4);
+}
+
 function buildSetupGuide(activeMode) {
-  return MODE_SETUP_GUIDES[activeMode.id] || MODE_SETUP_GUIDES.shooting_form;
+  return getModeGuide(activeMode.id);
 }
 
 function normalizeShotEvents(events) {
@@ -163,6 +211,8 @@ function normalizeShotEvents(events) {
         timestampSeconds: reviewStartSeconds,
         resultTimestampSeconds,
         reviewSeconds: Math.max(0, reviewStartSeconds - 1),
+        confidence: numericOrNull(source.confidence ?? source.score_confidence ?? source.result_confidence),
+        reason: source.reason || source.review_reason || source.result_reason || "",
       };
     })
     .sort((a, b) => a.shotNumber - b.shotNumber);
@@ -209,6 +259,23 @@ function shotFeedbackText(result, reviewLevel = "beginner") {
   return reviewLevel === "intermediate"
     ? "Result not clear. Check if the ball, hoop, and shooting motion are visible in this moment."
     : "Result not clear. Watch this moment and check if the ball and hoop are visible.";
+}
+
+function shotReasonText(event, reviewLevel = "beginner") {
+  if (event.reason) {
+    return event.reason;
+  }
+  if (event.result === "make") {
+    return reviewLevel === "intermediate"
+      ? "Counted as a make because the tracked ball path reached the hoop result window."
+      : "Counted as a make when the ball was tracked through the hoop area.";
+  }
+  if (event.result === "miss") {
+    return reviewLevel === "intermediate"
+      ? "Counted as a miss because the attempt resolved without a confirmed ball-through-hoop path."
+      : "Counted as a miss when the ball did not clearly pass through the hoop.";
+  }
+  return "Marked for review because the result was not clear enough.";
 }
 
 function buildTrackingReview(results) {
@@ -268,16 +335,18 @@ function buildModeReview({ activeMode, results }) {
   const tracking = buildTrackingReview(results);
 
   if (activeMode.id === "dribbling") {
+    const sections = [
+      buildReviewStatus("Ball Control", score, "Keep the ball close to your hand through each bounce."),
+      buildReviewStatus("Stance", Math.min(score, Number(results.poseDetectionRate || 0)), "Stay low with bent knees and balanced hips."),
+      buildReviewStatus("Rhythm", actionCount > 0 ? 78 : 45, "Aim for steady bounces instead of rushed or missed contacts."),
+    ];
     return {
       title: "Dribbling Review",
       actionLabel: "Dribbles Counted",
       actionValue: actionCount,
       intro: "Use this to check control, stance, and rhythm while watching the annotated clip.",
-      sections: [
-        buildReviewStatus("Ball Control", score, "Keep the ball close to your hand through each bounce."),
-        buildReviewStatus("Stance", Math.min(score, Number(results.poseDetectionRate || 0)), "Stay low with bent knees and balanced hips."),
-        buildReviewStatus("Rhythm", actionCount > 0 ? 78 : 45, "Aim for steady bounces instead of rushed or missed contacts."),
-      ],
+      sections,
+      moments: buildModeMomentCards(sections, "dribbling"),
       beginnerCue: focus,
       intermediateCue: "Check if the ball stays near the hand, below the hip, and close to the body line.",
       nextDrill: "Next drill: 30 seconds of low controlled dribbles, then switch hands.",
@@ -286,16 +355,18 @@ function buildModeReview({ activeMode, results }) {
   }
 
   if (activeMode.id === "passing") {
+    const sections = [
+      buildReviewStatus("Release Line", score, "Finish with your hands pointed toward the target."),
+      buildReviewStatus("Ball Connection", Math.min(score, Number(results.ballDetectionRate || 0)), "Keep the ball connected to your hands before release."),
+      buildReviewStatus("Balance", Math.min(score, Number(results.poseDetectionRate || 0)), "Stay balanced instead of leaning out of the pass."),
+    ];
     return {
       title: "Passing Review",
       actionLabel: "Passes Counted",
       actionValue: actionCount,
       intro: "Use this to check release line, ball connection, and balance through the pass.",
-      sections: [
-        buildReviewStatus("Release Line", score, "Finish with your hands pointed toward the target."),
-        buildReviewStatus("Ball Connection", Math.min(score, Number(results.ballDetectionRate || 0)), "Keep the ball connected to your hands before release."),
-        buildReviewStatus("Balance", Math.min(score, Number(results.poseDetectionRate || 0)), "Stay balanced instead of leaning out of the pass."),
-      ],
+      sections,
+      moments: buildModeMomentCards(sections, "passing"),
       beginnerCue: focus,
       intermediateCue: "Review elbow extension, wrist line, ball-to-hand distance, and balance at release.",
       nextDrill: "Next drill: 10 chest passes, freeze your follow-through after every pass.",
@@ -309,12 +380,36 @@ function buildModeReview({ activeMode, results }) {
 function buildReviewStatus(label, value, tip) {
   const numericValue = Number(value || 0);
   if (numericValue >= 75) {
-    return { label, status: "Good", color: colors.success, tip };
+    return { label, status: "Good", color: colors.success, tip, value: numericValue };
   }
   if (numericValue >= 55) {
-    return { label, status: "Fair", color: colors.warning, tip };
+    return { label, status: "Fair", color: colors.warning, tip, value: numericValue };
   }
-  return { label, status: "Needs Work", color: colors.danger, tip };
+  return { label, status: "Needs Work", color: colors.danger, tip, value: numericValue };
+}
+
+function buildModeMomentCards(sections, modeId) {
+  const sorted = [...sections].sort((a, b) => Number(b.value || 0) - Number(a.value || 0));
+  const best = sorted[0];
+  const fix = sorted[sorted.length - 1];
+  const timeBase = modeId === "dribbling" ? { best: 5, fix: 10 } : { best: 5, fix: 8 };
+
+  return [
+    {
+      label: "Best Check",
+      title: best?.label || "Strongest Cue",
+      time: timeBase.best,
+      color: best?.color || colors.success,
+      text: best?.tip || "Replay this moment and copy the same body control.",
+    },
+    {
+      label: "Fix First",
+      title: fix?.label || "Main Fix",
+      time: timeBase.fix,
+      color: fix?.color || colors.warning,
+      text: fix?.tip || "Replay this moment and correct the main cue first.",
+    },
+  ];
 }
 
 function buildReviewMoments({ activeMode, results, shotEvents }) {
@@ -405,6 +500,10 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   );
   const scoreExplanation = useMemo(
     () => buildScoreExplanation({ activeMode, results: coachingResults }),
+    [activeMode, coachingResults]
+  );
+  const scoreReasons = useMemo(
+    () => buildScoreReasons({ activeMode, results: coachingResults }),
     [activeMode, coachingResults]
   );
   const setupGuide = useMemo(
@@ -994,6 +1093,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
             <Feather name={menuOpen ? "x" : "menu"} size={23} color={colors.text} />
           </TouchableOpacity>
           <View style={cameraStyles.brandPill}>
+            <BrandMark size={24} />
             <Text style={cameraStyles.brandText}>SureBall</Text>
           </View>
           <TouchableOpacity activeOpacity={0.9} onPress={() => navigation.navigate("PlayerMenu")} style={cameraStyles.iconButton}>
@@ -1091,6 +1191,37 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
                   <Feather name={cameraPowered ? "camera-off" : "camera"} size={16} color={colors.text} />
                   <Text style={cameraStyles.menuToolText}>{cameraPowered ? "Camera Off" : "Camera On"}</Text>
                 </TouchableOpacity>
+              </View>
+
+              <Text style={[cameraStyles.menuEyebrow, { marginTop: 16 }]}>Full Guides</Text>
+              <View style={cameraStyles.menuGuideRow}>
+                {MODES.map((mode) => {
+                  const active = selectedModeId === mode.id;
+                  return (
+                    <TouchableOpacity
+                      key={mode.id}
+                      activeOpacity={0.9}
+                      onPress={() => {
+                        hapticSelection();
+                        setMenuOpen(false);
+                        navigation.navigate("FullGuide", { modeId: mode.id });
+                      }}
+                      style={[cameraStyles.menuGuideButton, active && cameraStyles.menuGuideButtonActive]}
+                    >
+                      <View style={[cameraStyles.menuGuideIcon, active && cameraStyles.menuGuideIconActive]}>
+                        <Feather name={mode.guideIcon} size={15} color={active ? "#091220" : colors.primary} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[cameraStyles.menuGuideButtonText, active && cameraStyles.menuGuideButtonTextActive]}>
+                          {mode.guideLabel}
+                        </Text>
+                        <Text style={[cameraStyles.menuGuideHint, active && cameraStyles.menuGuideButtonTextActive]}>
+                          {mode.guideHint}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
               </View>
             </ScrollView>
           </View>
@@ -1328,6 +1459,8 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           />
         ) : null}
 
+        {coachingResults.analyzedFrames > 0 ? <ScoreReasonPanel reasons={scoreReasons} /> : null}
+
         {selectedModeId === "shooting_form" && reviewShotEvents.length > 0 ? (
           <ShotReviewPanel shotEvents={reviewShotEvents} reviewLevel={reviewLevel} />
         ) : null}
@@ -1338,7 +1471,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
 
         {reviewLevel === "intermediate" && coachingResults.analyzedFrames > 0 ? (
           <View style={cameraStyles.explanationPanel}>
-            <Text style={cameraStyles.clipLabel}>Why This Score</Text>
+            <Text style={cameraStyles.clipLabel}>Score Details</Text>
             {scoreExplanation.map((item) => (
               <View key={item.label} style={cameraStyles.explanationRow}>
                 <Text style={cameraStyles.explanationLabel}>{item.label}</Text>
@@ -1395,6 +1528,38 @@ function SetupGuidePanel({ guide }) {
           <Text style={cameraStyles.setupTipText}>{tip}</Text>
         </View>
       ))}
+      <View style={cameraStyles.poseReferenceCard}>
+        <Text style={cameraStyles.poseReferenceTitle}>{guide.poseCardTitle}</Text>
+        <Text style={cameraStyles.poseReferenceHeadline}>{guide.poseHeadline}</Text>
+        <Image source={guide.image} accessibilityLabel={guide.imageAlt} style={cameraStyles.poseReferenceImage} resizeMode="contain" />
+        {guide.poseCues.map((cue) => (
+          <View key={cue} style={cameraStyles.poseCueRow}>
+            <View style={cameraStyles.poseCueDot} />
+            <Text style={cameraStyles.poseCueText}>{cue}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function ScoreReasonPanel({ reasons }) {
+  return (
+    <View style={cameraStyles.scoreReasonPanel}>
+      <Text style={cameraStyles.clipLabel}>Why This Score</Text>
+      <Text style={cameraStyles.scoreReasonIntro}>Main reasons SureBall judged this clip the way it did.</Text>
+      {reasons.map((reason) => {
+        const color = reason.tone === "good" ? colors.success : reason.tone === "warning" ? colors.warning : colors.secondary;
+        return (
+          <View key={reason.label} style={cameraStyles.scoreReasonRow}>
+            <View style={[cameraStyles.scoreReasonDot, { backgroundColor: color }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={cameraStyles.scoreReasonLabel}>{reason.label}</Text>
+              <Text style={cameraStyles.scoreReasonText}>{reason.text}</Text>
+            </View>
+          </View>
+        );
+      })}
     </View>
   );
 }
@@ -1506,7 +1671,11 @@ function ShotReviewPanel({ shotEvents, reviewLevel }) {
                 <Text style={[cameraStyles.shotReviewResult, { color: resultColor }]}>{formatShotResult(event.result)}</Text>
               </View>
               <Text style={cameraStyles.shotReviewTime}>{formatShotTime(resultTime)}</Text>
+              <View style={cameraStyles.shotReviewMetaRow}>
+                <Text style={cameraStyles.shotReviewMetaPill}>Jump: {formatShotTime(event.reviewSeconds)}</Text>
+              </View>
               <Text style={cameraStyles.shotReviewText}>{shotFeedbackText(event.result, reviewLevel)}</Text>
+              <Text style={cameraStyles.shotReviewReason}>{shotReasonText(event, reviewLevel)}</Text>
             </View>
           );
         })}
@@ -1537,6 +1706,18 @@ function ModeReviewPanel({ review, reviewLevel, miniGoalsEnabled }) {
           </View>
         ))}
       </View>
+      {review.moments?.length ? (
+        <View style={cameraStyles.modeMomentGrid}>
+          {review.moments.map((moment) => (
+            <View key={`${moment.label}-${moment.title}`} style={[cameraStyles.modeMomentCard, { borderColor: moment.color }]}>
+              <Text style={cameraStyles.modeMomentLabel}>{moment.label}</Text>
+              <Text style={cameraStyles.modeMomentTitle}>{moment.title}</Text>
+              <Text style={cameraStyles.modeMomentTime}>{formatShotTime(moment.time)}</Text>
+              <Text style={cameraStyles.modeMomentText}>{moment.text}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
       <Text style={cameraStyles.modeReviewCue}>
         {reviewLevel === "intermediate" ? review.intermediateCue : review.beginnerCue}
       </Text>
@@ -1710,16 +1891,19 @@ const cameraStyles = StyleSheet.create({
   },
   brandPill: {
     borderRadius: 999,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     backgroundColor: colors.overlay,
     borderWidth: 1,
     borderColor: colors.border,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   brandText: {
     color: colors.text,
     fontWeight: "900",
-    fontSize: 16,
+    fontSize: 15,
   },
   modeBadge: {
     position: "absolute",
@@ -1863,6 +2047,55 @@ const cameraStyles = StyleSheet.create({
     color: colors.text,
     fontSize: 11,
     fontWeight: "900",
+  },
+  menuGuideRow: {
+    gap: 8,
+    marginTop: 10,
+  },
+  menuGuideButton: {
+    minHeight: 58,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.backgroundSoft,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  menuGuideButtonActive: {
+    backgroundColor: "rgba(255, 122, 26, 0.16)",
+    borderColor: colors.primary,
+  },
+  menuGuideIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255, 122, 26, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 122, 26, 0.26)",
+  },
+  menuGuideIconActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  menuGuideButtonText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  menuGuideHint: {
+    marginTop: 3,
+    color: colors.muted,
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: "800",
+  },
+  menuGuideButtonTextActive: {
+    color: colors.text,
   },
   captureTray: {
     position: "absolute",
@@ -2107,6 +2340,93 @@ const cameraStyles = StyleSheet.create({
     lineHeight: 18,
     fontWeight: "700",
   },
+  poseReferenceCard: {
+    marginTop: 12,
+    borderRadius: 16,
+    padding: 12,
+    backgroundColor: "rgba(7, 17, 31, 0.34)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 122, 26, 0.2)",
+  },
+  poseReferenceTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  poseReferenceHeadline: {
+    marginTop: 6,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: "700",
+  },
+  poseReferenceImage: {
+    width: "100%",
+    height: 190,
+    marginTop: 12,
+    borderRadius: 14,
+    backgroundColor: colors.backgroundSoft,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  poseCueRow: {
+    marginTop: 8,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  poseCueDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    marginTop: 7,
+    backgroundColor: colors.secondary,
+  },
+  poseCueText: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: "700",
+  },
+  scoreReasonPanel: {
+    marginTop: 16,
+    borderRadius: 18,
+    padding: 14,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  scoreReasonIntro: {
+    marginTop: 6,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  scoreReasonRow: {
+    marginTop: 12,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  scoreReasonDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginTop: 6,
+  },
+  scoreReasonLabel: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  scoreReasonText: {
+    marginTop: 3,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: "700",
+  },
   coachReviewPanel: {
     marginTop: 16,
     borderRadius: 18,
@@ -2303,11 +2623,35 @@ const cameraStyles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "800",
   },
+  shotReviewMetaRow: {
+    marginTop: 8,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  shotReviewMetaPill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.backgroundSoft,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: "900",
+  },
   shotReviewText: {
     marginTop: 8,
     color: colors.text,
     fontSize: 12,
     lineHeight: 18,
+  },
+  shotReviewReason: {
+    marginTop: 6,
+    color: colors.secondary,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: "800",
   },
   modeReviewPanel: {
     marginTop: 16,
@@ -2374,6 +2718,40 @@ const cameraStyles = StyleSheet.create({
   },
   modeReviewTip: {
     marginTop: 8,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  modeMomentGrid: {
+    marginTop: 12,
+    gap: 10,
+  },
+  modeMomentCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    backgroundColor: colors.backgroundSoft,
+    padding: 12,
+  },
+  modeMomentLabel: {
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  modeMomentTitle: {
+    marginTop: 4,
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  modeMomentTime: {
+    marginTop: 3,
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  modeMomentText: {
+    marginTop: 7,
     color: colors.muted,
     fontSize: 12,
     lineHeight: 18,

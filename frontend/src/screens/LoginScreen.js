@@ -10,6 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import BrandMark from "../components/BrandMark";
 import { useAuth } from "../context/AuthContext";
 import { isSupabaseReady, normalizePlayerName } from "../services/supabase";
 import { colors } from "../theme/colors";
@@ -167,7 +168,7 @@ export default function LoginScreen() {
         >
           <View style={authStyles.brandBlock}>
             <View style={authStyles.logoMark}>
-              <Text style={authStyles.logoText}>SB</Text>
+              <BrandMark size={82} />
             </View>
             <Text style={authStyles.brandName}>SureBall</Text>
             <Text style={authStyles.brandCopy}>Camera-first basketball coaching.</Text>
@@ -365,20 +366,12 @@ const authStyles = StyleSheet.create({
   logoMark: {
     width: 82,
     height: 82,
-    borderRadius: 28,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: colors.cardElevated,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  logoText: {
-    color: colors.primary,
-    fontSize: 26,
-    fontWeight: "900",
+    overflow: "hidden",
   },
   brandName: {
-    marginTop: 22,
+    marginTop: 18,
     color: colors.text,
     fontSize: 42,
     fontWeight: "900",

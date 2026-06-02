@@ -11,9 +11,11 @@ import LiveAnalysisScreen from "./src/screens/LiveAnalysisScreen";
 import SessionHistoryScreen from "./src/screens/SessionHistoryScreen";
 import ShootingTrainingScreen from "./src/screens/ShootingTrainingScreen";
 import UnifiedCoachingSessionScreen from "./src/screens/UnifiedCoachingSessionScreen";
+import FullGuideScreen from "./src/screens/FullGuideScreen";
 import ProfileMenuScreen from "./src/screens/ProfileMenuScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
 import ChangePasswordScreen from "./src/screens/ChangePasswordScreen";
+import BrandMark from "./src/components/BrandMark";
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
 import { colors } from "./src/theme/colors";
 import { commonStyles } from "./src/theme/styles";
@@ -53,10 +55,13 @@ function HeaderAction({ onPress }) {
 
 function AuthLoadingScreen() {
   return (
-    <View style={commonStyles.screenCentered}>
-      <ActivityIndicator size="large" color={colors.primary} />
+    <View style={[commonStyles.screenCentered, { alignItems: "center" }]}>
+      <BrandMark size={76} />
       <Text style={[commonStyles.title, { marginTop: 18 }]}>Loading SureBall</Text>
-      <Text style={commonStyles.subtitle}>Checking your saved session and player profile.</Text>
+      <Text style={[commonStyles.subtitle, { textAlign: "center", maxWidth: 280 }]}>
+        Checking your saved session and player profile.
+      </Text>
+      <ActivityIndicator size="large" color={colors.primary} />
     </View>
   );
 }
@@ -109,6 +114,7 @@ function AppNavigator() {
               component={ShootingTrainingScreen}
               options={{ title: "Shooting Training" }}
             />
+            <Stack.Screen name="FullGuide" component={FullGuideScreen} options={{ title: "Full Guide" }} />
             <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} options={{ title: "Change Password" }} />
             <Stack.Screen name="SessionHistory" component={SessionHistoryScreen} options={{ title: "Session History" }} />
           </>
