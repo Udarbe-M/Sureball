@@ -21,6 +21,8 @@ from .shot_training import (
     ShotTrainingTracker,
     _apply_orientation_correction,
     _enable_capture_auto_orientation,
+    _normalize_source_orientation,
+    _orientation_label,
     _read_capture_orientation,
 )
 from .utils import DATA_DIR, append_session_history, now_utc
@@ -53,6 +55,9 @@ class CoachingActionCounter:
         self.last_count_frame = -10_000
         self.min_gap_frames = max(5, int(fps * 0.25))
         self.low_contact_active = False
+        self.dribble_ready = True
+        self.dribble_release_frames = 0
+        self.min_dribble_release_frames = 1
         self.pass_ready = False
 
     def observe(self, response: Any) -> None:
@@ -72,10 +77,21 @@ class CoachingActionCounter:
         ball_zone = _feature_value(features, "ball_vertical_zone")
         hand_distance = _feature_float(features, "ball_to_wrist_distance")
         controlled_low_contact = ball_zone == "low" and (hand_distance is None or hand_distance <= 1.1)
+        released_from_contact = ball_zone == "high" or _is_at_or_above(hand_distance, 0.85)
 
-        if controlled_low_contact and not self.low_contact_active and self._can_count(frame_index):
+        if controlled_low_contact and self.dribble_ready and not self.low_contact_active and self._can_count(frame_index):
             self.count += 1
             self.last_count_frame = frame_index
+            self.dribble_ready = False
+            self.dribble_release_frames = 0
+        elif controlled_low_contact:
+            self.dribble_release_frames = 0
+        elif released_from_contact:
+            self.dribble_release_frames += 1
+            if self.dribble_release_frames >= self.min_dribble_release_frames:
+                self.dribble_ready = True
+        else:
+            self.dribble_release_frames = 0
 
         self.low_contact_active = controlled_low_contact
 
@@ -98,6 +114,16 @@ class CoachingActionCounter:
         return frame_index - self.last_count_frame >= self.min_gap_frames
 
 
+def _overlay_policy(overlay_mode: str) -> dict[str, bool]:
+    return {
+        "use_annotated_frame": overlay_mode == "full_overlay",
+        "show_detection_boxes": overlay_mode == "full_overlay",
+        "show_cue_banner": overlay_mode in {"full_overlay", "focus_feedback"},
+        "show_score_panel": True,
+        "show_footer": overlay_mode != "score_only",
+    }
+
+
 class CoachingVideoJob:
     def __init__(
         self,
@@ -112,6 +138,7 @@ class CoachingVideoJob:
         test_mode: bool,
         user_key: str,
         sample_stride: int,
+        source_orientation: str = "auto",
     ) -> None:
         self.file_id = file_id
         self.mode = mode
@@ -123,6 +150,7 @@ class CoachingVideoJob:
         self.test_mode = test_mode
         self.user_key = user_key
         self.sample_stride = effective_coaching_sample_stride(mode, sample_stride)
+        self.source_orientation = _normalize_source_orientation(source_orientation)
 
     def run(self) -> None:
         capture = cv2.VideoCapture(str(self.input_path))
@@ -157,8 +185,10 @@ class CoachingVideoJob:
                 orientation_degrees,
                 auto_orientation_enabled=auto_orientation_enabled,
                 encoded_frame_size=(encoded_frame_width, encoded_frame_height),
+                source_orientation=self.source_orientation,
             )
             frame_height, frame_width = first_frame.shape[:2]
+            output_orientation = _orientation_label(frame_width, frame_height)
 
             writer = AnnotatedVideoWriter(
                 output_path=self.output_path,
@@ -172,6 +202,12 @@ class CoachingVideoJob:
                 processed_frames=0,
                 total_frames=max_frames,
                 progress_percentage=0,
+                input_width=encoded_frame_width,
+                input_height=encoded_frame_height,
+                output_width=frame_width,
+                output_height=frame_height,
+                input_orientation=_orientation_label(encoded_frame_width, encoded_frame_height),
+                output_orientation=output_orientation,
                 analyzed_frames=0,
                 pose_frames=0,
                 ball_frames=0,
@@ -202,6 +238,7 @@ class CoachingVideoJob:
             landmark_smoother = LandmarkSmoother(min_cutoff=1.2, beta=0.03, derivative_cutoff=1.0)
             action_counter = CoachingActionCounter(self.mode, fps=fps)
             shot_tracker = ShotTrainingTracker(fps) if self.mode == "shooting_form" else None
+            overlay_policy = _overlay_policy(self.overlay_mode)
             frame = first_frame
 
             while frame_index < max_frames:
@@ -249,7 +286,7 @@ class CoachingVideoJob:
                     raise RuntimeError("Coaching analysis did not produce any frame results.")
 
                 response = latest_bundle["response"]
-                if should_analyze and self.overlay_mode == "full_overlay":
+                if should_analyze and overlay_policy["use_annotated_frame"]:
                     annotated = latest_bundle["annotated_frame"].copy()
                 else:
                     annotated = frame.copy()
@@ -260,6 +297,7 @@ class CoachingVideoJob:
                     action_counter=action_counter,
                     shot_tracker=shot_tracker,
                     shot_detections=shot_detections,
+                    overlay_policy=overlay_policy,
                 )
                 writer.write(annotated)
 
@@ -281,6 +319,9 @@ class CoachingVideoJob:
                         processed_frames=frame_index,
                         total_frames=max_frames,
                         progress_percentage=int((frame_index / max(max_frames, 1)) * 100),
+                        output_width=frame_width,
+                        output_height=frame_height,
+                        output_orientation=output_orientation,
                         analyzed_frames=analyzed_frames,
                         pose_frames=pose_frames,
                         ball_frames=ball_frames,
@@ -308,6 +349,7 @@ class CoachingVideoJob:
                     orientation_degrees,
                     auto_orientation_enabled=auto_orientation_enabled,
                     encoded_frame_size=(encoded_frame_width, encoded_frame_height),
+                    source_orientation=self.source_orientation,
                 )
 
             writer.close()
@@ -377,6 +419,9 @@ class CoachingVideoJob:
                 processed_frames=frame_index,
                 total_frames=max(frame_index, max_frames),
                 progress_percentage=100,
+                output_width=frame_width,
+                output_height=frame_height,
+                output_orientation=output_orientation,
                 analyzed_frames=analyzed_frames,
                 pose_frames=pose_frames,
                 ball_frames=ball_frames,
@@ -419,22 +464,26 @@ class CoachingVideoJob:
         action_counter: CoachingActionCounter,
         shot_tracker: Optional[ShotTrainingTracker] = None,
         shot_detections: Optional[list[Dict[str, float | str]]] = None,
+        overlay_policy: Optional[dict[str, bool]] = None,
     ) -> None:
-        if shot_tracker is not None and shot_detections:
+        policy = overlay_policy or _overlay_policy(self.overlay_mode)
+        if policy["show_detection_boxes"] and shot_tracker is not None and shot_detections:
             _draw_shooting_detection_boxes(frame, shot_detections)
 
-        if self.overlay_mode in {"full_overlay", "focus_feedback"}:
+        if policy["show_cue_banner"]:
             primary_label = _simple_feedback_label(self.mode, response)
             secondary_label = _simple_summary_label(self.mode, response, action_counter, shot_tracker)
             overlay = frame.copy()
-            cv2.rectangle(overlay, (18, 18), (frame.shape[1] - 18, 92), (10, 16, 28), -1)
+            height, width = frame.shape[:2]
+            banner_height = 64 if width > height else 74
+            cv2.rectangle(overlay, (18, 18), (width - 18, 18 + banner_height), (10, 16, 28), -1)
             cv2.addWeighted(overlay, 0.58, frame, 0.42, 0, frame)
             cv2.putText(
                 frame,
                 primary_label,
-                (34, 58),
+                (34, 56),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.75,
+                0.66 if width > height else 0.75,
                 (255, 225, 120),
                 2,
                 cv2.LINE_AA,
@@ -442,7 +491,7 @@ class CoachingVideoJob:
             cv2.putText(
                 frame,
                 secondary_label,
-                (34, 82),
+                (34, 78),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.42,
                 (235, 240, 250),
@@ -450,15 +499,30 @@ class CoachingVideoJob:
                 cv2.LINE_AA,
             )
 
-        self._draw_score_panel(frame, response=response, action_counter=action_counter)
+        if policy["show_score_panel"]:
+            self._draw_score_panel(
+                frame,
+                response=response,
+                action_counter=action_counter,
+                result_only=self.overlay_mode == "score_only",
+            )
         if shot_tracker is not None:
             _draw_shooting_count_panel(frame, shot_tracker)
-        self._draw_footer(frame)
+        if policy["show_footer"]:
+            self._draw_footer(frame)
 
-    def _draw_score_panel(self, frame: np.ndarray, *, response: Any, action_counter: CoachingActionCounter) -> None:
+    def _draw_score_panel(
+        self,
+        frame: np.ndarray,
+        *,
+        response: Any,
+        action_counter: CoachingActionCounter,
+        result_only: bool = False,
+    ) -> None:
         height, width = frame.shape[:2]
-        panel_width = min(width - 32, 390)
-        panel_height = 118
+        landscape = width > height
+        panel_width = min(width - 32, 560 if landscape else 390)
+        panel_height = 82 if landscape else 118
         x = 16
         y = max(16, height - panel_height - 16)
 
@@ -467,17 +531,65 @@ class CoachingVideoJob:
         cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
         cv2.rectangle(frame, (x, y), (x + panel_width, y + panel_height), (20, 105, 255), 2)
 
-        _draw_metric(frame, "SCORE", str(response.score.score), x + 18, y + 28, (255, 255, 255))
-        _draw_metric(frame, "CLASS", response.score.classification, x + 130, y + 28, (60, 220, 100))
-        _draw_metric(frame, "POSE", "Locked" if response.pose_detected else "Search", x + 264, y + 28, (0, 255, 255))
-        _draw_metric(frame, "BALL", "Locked" if response.ball_detected else "Search", x + 18, y + 78, (255, 180, 80))
-
         landmarks_count = len(response.landmarks or {})
         detail_label = "LANDMARKS"
         detail_value = str(landmarks_count)
         if action_counter.action_label:
             detail_label = action_counter.action_label.upper()
             detail_value = str(action_counter.count)
+
+        if result_only:
+            if landscape:
+                _draw_metric(frame, "SCORE", str(response.score.score), x + 18, y + 24, (255, 255, 255), value_scale=0.68)
+                _draw_metric(frame, "CLASS", response.score.classification, x + 132, y + 24, (60, 220, 100), value_scale=0.62)
+                cv2.putText(
+                    frame,
+                    f"{detail_label} {detail_value}",
+                    (x + min(336, max(196, panel_width - 170)), y + 58),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (235, 240, 250),
+                    2,
+                    cv2.LINE_AA,
+                )
+                return
+
+            _draw_metric(frame, "SCORE", str(response.score.score), x + 18, y + 28, (255, 255, 255))
+            _draw_metric(frame, "CLASS", response.score.classification, x + 140, y + 28, (60, 220, 100))
+            cv2.putText(
+                frame,
+                f"{detail_label} {detail_value}",
+                (x + 18, y + 92),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.68,
+                (235, 240, 250),
+                2,
+                cv2.LINE_AA,
+            )
+            return
+
+        if landscape:
+            detail_x = min(x + 470, max(x + 18, x + panel_width - 112))
+            _draw_metric(frame, "SCORE", str(response.score.score), x + 18, y + 24, (255, 255, 255), value_scale=0.64)
+            _draw_metric(frame, "CLASS", response.score.classification, x + 116, y + 24, (60, 220, 100), value_scale=0.58)
+            _draw_metric(frame, "POSE", "Locked" if response.pose_detected else "Search", x + 266, y + 24, (0, 255, 255), value_scale=0.58)
+            _draw_metric(frame, "BALL", "Locked" if response.ball_detected else "Search", x + 374, y + 24, (255, 180, 80), value_scale=0.58)
+            cv2.putText(
+                frame,
+                f"{detail_label} {detail_value}",
+                (detail_x, y + 58),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.52,
+                (235, 240, 250),
+                2,
+                cv2.LINE_AA,
+            )
+            return
+
+        _draw_metric(frame, "SCORE", str(response.score.score), x + 18, y + 28, (255, 255, 255))
+        _draw_metric(frame, "CLASS", response.score.classification, x + 130, y + 28, (60, 220, 100))
+        _draw_metric(frame, "POSE", "Locked" if response.pose_detected else "Search", x + 264, y + 28, (0, 255, 255))
+        _draw_metric(frame, "BALL", "Locked" if response.ball_detected else "Search", x + 18, y + 78, (255, 180, 80))
         cv2.putText(
             frame,
             f"{detail_label} {detail_value}",
@@ -515,6 +627,7 @@ def start_coaching_video_job(
     test_mode: bool,
     user_key: str,
     sample_stride: int = 5,
+    source_orientation: str = "auto",
 ) -> dict[str, object]:
     ensure_coaching_video_dirs()
 
@@ -533,9 +646,16 @@ def start_coaching_video_job(
             "status": "queued",
             "overlay_mode": overlay_mode,
             "test_mode": test_mode,
+            "source_orientation": _normalize_source_orientation(source_orientation),
             "processed_frames": 0,
             "total_frames": 0,
             "progress_percentage": 0,
+            "input_width": 0,
+            "input_height": 0,
+            "output_width": 0,
+            "output_height": 0,
+            "input_orientation": "unknown",
+            "output_orientation": "unknown",
             "analyzed_frames": 0,
             "pose_frames": 0,
             "ball_frames": 0,
@@ -567,6 +687,7 @@ def start_coaching_video_job(
         test_mode=test_mode,
         user_key=user_key,
         sample_stride=sample_stride,
+        source_orientation=source_orientation,
     )
     thread = threading.Thread(target=worker.run, daemon=True)
     thread.start()
@@ -583,9 +704,16 @@ def get_coaching_video_status(file_id: str) -> dict[str, object]:
                 "status": "not_found",
                 "overlay_mode": None,
                 "test_mode": False,
+                "source_orientation": None,
                 "processed_frames": 0,
                 "total_frames": 0,
                 "progress_percentage": 0,
+                "input_width": 0,
+                "input_height": 0,
+                "output_width": 0,
+                "output_height": 0,
+                "input_orientation": "unknown",
+                "output_orientation": "unknown",
                 "analyzed_frames": 0,
                 "pose_frames": 0,
                 "ball_frames": 0,
@@ -908,6 +1036,7 @@ def _draw_metric(
     x: int,
     y: int,
     color: tuple[int, int, int],
+    value_scale: float = 0.78,
 ) -> None:
     cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (165, 175, 200), 1, cv2.LINE_AA)
-    cv2.putText(frame, value, (x, y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.78, color, 2, cv2.LINE_AA)
+    cv2.putText(frame, value, (x, y + 28), cv2.FONT_HERSHEY_SIMPLEX, value_scale, color, 2, cv2.LINE_AA)

@@ -109,10 +109,21 @@ export default function LoginScreen() {
           playerName: normalizedName,
         });
 
-        if (result.needsEmailVerification) {
+        if (result.signInBlockedUntilVerified) {
           setPendingVerificationEmail(normalizedEmail);
+          setAuthMode("login");
+          setMessageTone("error");
+          setMessage(
+            "Account created, but sign-in is still blocked until email verification. To allow sign-in before verification, turn off required email confirmation in Supabase Auth settings."
+          );
+        } else if (result.needsEmailVerification) {
+          setPendingVerificationEmail(normalizedEmail);
+          setAuthMode("login");
           setMessageTone("success");
-          setMessage("Check your email to confirm the account, then return here to sign in.");
+          setMessage("Account created. You can sign in now, then verify your email later.");
+        } else {
+          setMessageTone("success");
+          setMessage("Account created. Signing you in now.");
         }
       } else {
         await signIn({
@@ -121,8 +132,12 @@ export default function LoginScreen() {
         });
       }
     } catch (error) {
+      const errorMessage = String(error.message || error);
+      if (/email verification|email is verified|email verified|email not confirmed|blocking sign-in/i.test(errorMessage)) {
+        setPendingVerificationEmail(normalizedEmail);
+      }
       setMessageTone("error");
-      setMessage(String(error.message || error));
+      setMessage(errorMessage);
     } finally {
       setSaving(false);
     }
@@ -182,7 +197,7 @@ export default function LoginScreen() {
                 ? "Open the camera, record a clip, and get coaching feedback."
                 : registerMode === "guest"
                   ? "Create a local guest profile and start recording right away."
-                  : "Create your player account, then use the camera coaching flow."}
+                  : "Create your player account and continue right away. Email verification can be completed later."}
             </Text>
 
             <View style={authStyles.toggleRow}>
@@ -296,7 +311,7 @@ export default function LoginScreen() {
               </Text>
             ) : null}
 
-            {pendingVerificationEmail && authMode === "register" && registerMode === "account" ? (
+            {pendingVerificationEmail && registerMode === "account" ? (
               <TouchableOpacity
                 activeOpacity={0.85}
                 disabled={resendingVerification || saving}
@@ -310,7 +325,13 @@ export default function LoginScreen() {
             ) : null}
 
             <AuthButton
-              title={authMode === "login" ? "Sign in" : registerMode === "guest" ? "Continue as guest" : "Create account"}
+              title={
+                authMode === "login"
+                  ? "Sign in"
+                  : registerMode === "guest"
+                    ? "Continue as guest"
+                    : "Create account & sign in"
+              }
               onPress={handleSubmit}
               loading={saving}
               disabled={actionDisabled}

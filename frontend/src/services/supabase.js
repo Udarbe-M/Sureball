@@ -43,6 +43,12 @@ export function isSupabaseReady() {
 function mapAuthError(error) {
   const message = String(error?.message || error || "").trim();
 
+  if (/email not confirmed/i.test(message) || /confirm.*email/i.test(message)) {
+    return new Error(
+      "This account exists, but Supabase is still blocking sign-in until the email is verified."
+    );
+  }
+
   if (/email address .* not authorized/i.test(message)) {
     return new Error(
       "This Supabase project is still using the default email sender. Verification emails only go to project team addresses until custom SMTP is configured."
@@ -56,6 +62,11 @@ function mapAuthError(error) {
   }
 
   return new Error(message || "Supabase authentication failed.");
+}
+
+function isEmailNotConfirmedError(error) {
+  const message = String(error?.message || error || "").trim();
+  return /email not confirmed/i.test(message) || /confirm.*email/i.test(message);
 }
 
 function requireSupabase() {
@@ -119,6 +130,7 @@ export async function signInWithEmail({ email, password }) {
 
 export async function signUpWithEmail({ email, password, playerName }) {
   const client = requireSupabase();
+  const normalizedEmail = String(email || "").trim().toLowerCase();
   const options = {
     data: {
       player_name: normalizePlayerName(playerName),
@@ -129,7 +141,7 @@ export async function signUpWithEmail({ email, password, playerName }) {
   }
 
   const { data, error } = await client.auth.signUp({
-    email: String(email || "").trim().toLowerCase(),
+    email: normalizedEmail,
     password,
     options,
   });
@@ -138,10 +150,40 @@ export async function signUpWithEmail({ email, password, playerName }) {
     throw mapAuthError(error);
   }
 
+  if (!data.session) {
+    const { data: signInData, error: signInError } = await client.auth.signInWithPassword({
+      email: normalizedEmail,
+      password,
+    });
+
+    if (signInError) {
+      if (isEmailNotConfirmedError(signInError)) {
+        return {
+          session: null,
+          user: data.user,
+          needsEmailVerification: true,
+          signInBlockedUntilVerified: true,
+          signInBlockedMessage:
+            "Account created, but this Supabase project still requires email verification before sign-in.",
+        };
+      }
+
+      throw mapAuthError(signInError);
+    }
+
+    return {
+      session: signInData.session,
+      user: signInData.user || data.user,
+      needsEmailVerification: !signInData.session,
+      signedInAfterSignup: Boolean(signInData.session),
+    };
+  }
+
   return {
     session: data.session,
     user: data.user,
-    needsEmailVerification: !data.session,
+    needsEmailVerification: false,
+    signedInAfterSignup: true,
   };
 }
 

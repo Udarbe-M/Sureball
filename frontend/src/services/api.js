@@ -190,11 +190,12 @@ export async function deleteSessionFromBackend(sessionId, userKey) {
   return response.json();
 }
 
-export async function startShootingTraining({ videoAsset, overlayMode, testMode, userKey, onUploadProgress, abortSignal }) {
+export async function startShootingTraining({ videoAsset, overlayMode, testMode, userKey, sourceOrientation = "auto", onUploadProgress, abortSignal }) {
   const formData = new FormData();
   formData.append("overlay_mode", overlayMode);
   formData.append("test_mode", String(Boolean(testMode)));
   formData.append("user_key", userKey);
+  formData.append("source_orientation", sourceOrientation);
   formData.append("video", {
     uri: videoAsset.uri,
     name: videoAsset.name || `shooting-${Date.now()}.mp4`,
@@ -232,12 +233,13 @@ export function buildShootingTrainingDownloadUrl(fileId) {
   return buildUri(`/shooting-training/download/${fileId}`);
 }
 
-export async function startCoachingVideoAnalysis({ mode, videoAsset, overlayMode, testMode, userKey, onUploadProgress, abortSignal }) {
+export async function startCoachingVideoAnalysis({ mode, videoAsset, overlayMode, testMode, userKey, sourceOrientation = "auto", onUploadProgress, abortSignal }) {
   const formData = new FormData();
   formData.append("mode", mapModeToBackend(mode));
   formData.append("overlay_mode", overlayMode);
   formData.append("test_mode", String(Boolean(testMode)));
   formData.append("user_key", userKey);
+  formData.append("source_orientation", sourceOrientation);
   formData.append("video", {
     uri: videoAsset.uri,
     name: videoAsset.name || `coaching-${Date.now()}.mp4`,

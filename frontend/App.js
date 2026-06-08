@@ -1,10 +1,11 @@
 import "react-native-gesture-handler";
-import React from "react";
+import React, { useEffect } from "react";
 import { DefaultTheme, NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { Feather } from "@expo/vector-icons";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
+import * as ScreenOrientation from "expo-screen-orientation";
 import LoginScreen from "./src/screens/LoginScreen";
 import DashboardScreen from "./src/screens/DashboardScreen";
 import LiveAnalysisScreen from "./src/screens/LiveAnalysisScreen";
@@ -127,6 +128,10 @@ function AppNavigator() {
 }
 
 export default function App() {
+  useEffect(() => {
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+  }, []);
+
   return (
     <AuthProvider>
       <AppNavigator />

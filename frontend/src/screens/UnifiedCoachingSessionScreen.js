@@ -1,11 +1,15 @@
 import { useEvent } from "expo";
 import { Feather } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/native";
+import { useAudioPlayer } from "expo-audio";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
+import * as ScreenOrientation from "expo-screen-orientation";
 import { VideoView, useVideoPlayer } from "expo-video";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Image, Linking, PanResponder, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import BrandMark from "../components/BrandMark";
+import MotionGuideCard from "../components/MotionGuideCard";
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
 import { getModeGuide } from "../data/modeGuides";
@@ -18,7 +22,12 @@ import {
 } from "../services/api";
 import { Haptics, hapticImpact, hapticSelection, hapticSuccess, hapticWarning } from "../services/haptics";
 import { archiveCompletedSession } from "../services/sessionArchive";
+import {
+  getRecordingCountdownSecondsPreference,
+  getRecordingCountdownSoundPreference,
+} from "../services/storage";
 import { colors } from "../theme/colors";
+import { COUNTDOWN_BEEP_SOURCE, COUNTDOWN_START_BUZZER_SOURCE, wait } from "../utils/countdown";
 import { buildUserKey } from "../utils/userKey";
 
 const MODES = [
@@ -55,17 +64,17 @@ const COACHING_OVERLAY_OPTIONS = [
   {
     id: "full_overlay",
     title: "Full Overlay",
-    description: "Show pose landmarks, ball tracking, score, and feedback on the analyzed video.",
+    description: "Show tracking details, detection boxes, coaching cues, score, and counts.",
   },
   {
     id: "focus_feedback",
     title: "Focus",
-    description: "Prioritize coaching cues and score panels with a cleaner presentation.",
+    description: "Show the main coaching cue, score, tracking status, and counts without detection boxes.",
   },
   {
     id: "score_only",
     title: "Score",
-    description: "Keep the output clean with the scoreboard and footer only.",
+    description: "Show only the score/classification and drill count results.",
   },
 ];
 
@@ -76,6 +85,11 @@ const REVIEW_LEVELS = [
 
 const COLLAPSED_SHEET_HEIGHT_ESTIMATE = 108;
 const SHEET_TOP_OVERLAP = 20;
+const SOURCE_ORIENTATION_OPTIONS = [
+  { id: "auto", title: "Auto" },
+  { id: "portrait", title: "Portrait" },
+  { id: "landscape", title: "Landscape" },
+];
 
 const INITIAL_COACHING_RESULTS = {
   analyzedFrames: 0,
@@ -93,6 +107,12 @@ const INITIAL_COACHING_RESULTS = {
   classification: "",
   summary: "",
   dominantFeedback: [],
+  inputWidth: 0,
+  inputHeight: 0,
+  outputWidth: 0,
+  outputHeight: 0,
+  inputOrientation: "unknown",
+  outputOrientation: "unknown",
 };
 
 function clampPercent(value) {
@@ -205,14 +225,16 @@ function normalizeShotEvents(events) {
       const timestampSeconds = numericOrNull(source.timestampSeconds ?? source.timestamp_seconds);
       const resultTimestampSeconds = numericOrNull(source.resultTimestampSeconds ?? source.result_timestamp_seconds);
       const reviewStartSeconds = timestampSeconds ?? resultTimestampSeconds ?? 0;
+      const evidence = Array.isArray(source.evidence) ? source.evidence.filter(Boolean) : [];
       return {
         shotNumber: Number(source.shotNumber ?? source.shot_number ?? index + 1) || index + 1,
         result: String(source.result || "pending").toLowerCase(),
         timestampSeconds: reviewStartSeconds,
         resultTimestampSeconds,
         reviewSeconds: Math.max(0, reviewStartSeconds - 1),
-        confidence: numericOrNull(source.confidence ?? source.score_confidence ?? source.result_confidence),
         reason: source.reason || source.review_reason || source.result_reason || "",
+        resultQuality: String(source.resultQuality || source.result_quality || "").toLowerCase(),
+        evidence,
       };
     })
     .sort((a, b) => a.shotNumber - b.shotNumber);
@@ -243,6 +265,20 @@ function shotResultColor(result) {
   if (result === "make") return colors.success;
   if (result === "miss") return colors.warning;
   return colors.secondary;
+}
+
+function resultQualityColor(quality) {
+  if (quality === "high") return colors.success;
+  if (quality === "medium") return colors.warning;
+  if (quality === "low") return colors.danger;
+  return colors.secondary;
+}
+
+function formatResultQuality(quality) {
+  if (quality === "high") return "High";
+  if (quality === "medium") return "Medium";
+  if (quality === "low") return "Low";
+  return "Review";
 }
 
 function shotFeedbackText(result, reviewLevel = "beginner") {
@@ -444,15 +480,20 @@ function buildReviewMoments({ activeMode, results, shotEvents }) {
 export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const initialModeId = route.params?.initialModeId || "shooting_form";
   const { playerEmail, playerName, userId } = useAuth();
-  const { height: viewportHeight } = useWindowDimensions();
-  const collapsedCameraHeight = Math.min(
-    Math.max(430, Math.round(viewportHeight - COLLAPSED_SHEET_HEIGHT_ESTIMATE + SHEET_TOP_OVERLAP)),
-    Math.max(360, viewportHeight - 86)
-  );
-  const expandedCameraHeight = Math.min(
-    Math.max(280, Math.round(viewportHeight * 0.43)),
-    Math.max(280, collapsedCameraHeight - 220)
-  );
+  const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
+  const landscapeViewport = viewportWidth > viewportHeight;
+  const collapsedCameraHeight = landscapeViewport
+    ? Math.max(300, viewportHeight)
+    : Math.min(
+        Math.max(430, Math.round(viewportHeight - COLLAPSED_SHEET_HEIGHT_ESTIMATE + SHEET_TOP_OVERLAP)),
+        Math.max(360, viewportHeight - 86)
+      );
+  const expandedCameraHeight = landscapeViewport
+    ? Math.max(240, Math.round(viewportHeight * 0.58))
+    : Math.min(
+        Math.max(280, Math.round(viewportHeight * 0.43)),
+        Math.max(280, collapsedCameraHeight - 220)
+      );
   const [selectedModeId, setSelectedModeId] = useState(initialModeId);
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [videoSource, setVideoSource] = useState("camera");
@@ -472,6 +513,11 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const [cameraStarting, setCameraStarting] = useState(false);
   const [cameraTrouble, setCameraTrouble] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [cameraFacing, setCameraFacing] = useState("back");
+  const [countdownValue, setCountdownValue] = useState(null);
+  const [recordingCountdownSeconds, setRecordingCountdownSeconds] = useState(3);
+  const [recordingCountdownSound, setRecordingCountdownSound] = useState(true);
+  const [sourceOrientation, setSourceOrientation] = useState("auto");
   const [menuOpen, setMenuOpen] = useState(false);
   const [overlayMode, setOverlayMode] = useState("focus_feedback");
   const [reviewLevel, setReviewLevel] = useState("beginner");
@@ -479,17 +525,29 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const [recordingStatus, setRecordingStatus] = useState("Frame the player, then record or upload a clip.");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
+  const countdownCancelRef = useRef(false);
   const uploadAbortRef = useRef(null);
   const cameraReadyTimerRef = useRef(null);
   const sheetContentScrollRef = useRef(null);
   const sheetDragStartHeightRef = useRef(collapsedCameraHeight);
   const cameraStageHeightRef = useRef(collapsedCameraHeight);
   const [cameraStageHeight, setCameraStageHeight] = useState(collapsedCameraHeight);
+  const countdownPlayer = useAudioPlayer(COUNTDOWN_BEEP_SOURCE);
+  const countdownStartPlayer = useAudioPlayer(COUNTDOWN_START_BUZZER_SOURCE);
 
   const userKey = useMemo(
     () => buildUserKey({ userId, playerName, playerEmail }),
     [playerEmail, playerName, userId]
   );
+
+  const refreshCountdownPreferences = useCallback(async () => {
+    const [seconds, soundEnabled] = await Promise.all([
+      getRecordingCountdownSecondsPreference(userKey),
+      getRecordingCountdownSoundPreference(userKey),
+    ]);
+    setRecordingCountdownSeconds(seconds);
+    setRecordingCountdownSound(soundEnabled);
+  }, [userKey]);
   const activeMode = useMemo(
     () => MODES.find((item) => item.id === selectedModeId) || MODES[0],
     [selectedModeId]
@@ -627,6 +685,38 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   }, [collapsedCameraHeight, expandedCameraHeight]);
 
   useEffect(() => {
+    let mounted = true;
+    refreshCountdownPreferences()
+      .then(() => {
+        if (!mounted) {
+          return;
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [refreshCountdownPreferences]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshCountdownPreferences().catch(() => {});
+    }, [refreshCountdownPreferences])
+  );
+
+  useEffect(() => {
+    if (cameraOpen) {
+      ScreenOrientation.unlockAsync().catch(() => {});
+      return () => {
+        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+      };
+    }
+
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    return undefined;
+  }, [cameraOpen]);
+
+  useEffect(() => {
     const nextModeId = route.params?.initialModeId || "shooting_form";
     const nextMode = MODES.find((item) => item.id === nextModeId) || MODES[0];
     setSelectedModeId(nextMode.id);
@@ -635,7 +725,10 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
     setCameraStarting(false);
     setCameraTrouble(false);
     setRecording(false);
+    setCountdownValue(null);
+    countdownCancelRef.current = true;
     setMenuOpen(false);
+    setSourceOrientation("auto");
     setRecordingStatus("Camera off. Turn it on when you are ready to record or upload a clip.");
     resetRunState();
   }, [route.params?.initialModeId]);
@@ -665,6 +758,12 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           classification: result.classification || "",
           summary: result.summary || "",
           dominantFeedback: result.dominant_feedback || [],
+          inputWidth: result.input_width || 0,
+          inputHeight: result.input_height || 0,
+          outputWidth: result.output_width || 0,
+          outputHeight: result.output_height || 0,
+          inputOrientation: result.input_orientation || "unknown",
+          outputOrientation: result.output_orientation || "unknown",
         });
 
         if (result.status === "completed") {
@@ -759,6 +858,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
 
   useEffect(() => {
     return () => {
+      countdownCancelRef.current = true;
       clearCameraReadyTimer();
       if (cameraRef.current && recording) {
         cameraRef.current.stopRecording();
@@ -791,6 +891,39 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
     setRecordingStatus("Frame the player, then tap record.");
   }
 
+  function playCountdownCue() {
+    hapticSelection();
+    if (!recordingCountdownSound) {
+      return;
+    }
+    try {
+      countdownPlayer.seekTo(0);
+      countdownPlayer.play();
+    } catch (_error) {
+      // Haptics still provide a fallback cue if audio is unavailable.
+    }
+  }
+
+  function playCountdownStartCue() {
+    hapticImpact(Haptics.ImpactFeedbackStyle.Heavy);
+    if (!recordingCountdownSound) {
+      return;
+    }
+    try {
+      countdownStartPlayer.seekTo(0);
+      countdownStartPlayer.play();
+    } catch (_error) {
+      // Haptics still provide a fallback start cue if audio is unavailable.
+    }
+  }
+
+  function cancelRecordingCountdown() {
+    countdownCancelRef.current = true;
+    setCountdownValue(null);
+    setRecordingStatus("Countdown cancelled. Tap record when you are ready.");
+    hapticWarning();
+  }
+
   async function pickVideo() {
     hapticSelection();
     const result = await DocumentPicker.getDocumentAsync({
@@ -803,6 +936,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
 
     setVideoSource("upload");
     setSelectedVideo(result.assets[0]);
+    setSourceOrientation("auto");
     clearCameraReadyTimer();
     setCameraOpen(false);
     setCameraStarting(false);
@@ -832,13 +966,43 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   }
 
   async function startRecordingClip() {
-    if (!cameraRef.current || recording) {
+    if (!cameraRef.current || recording || countdownValue !== null) {
       return;
     }
 
     setErrorMessage("");
     hapticImpact(Haptics.ImpactFeedbackStyle.Medium);
+    const countdownSeconds = Number(recordingCountdownSeconds || 0);
+    if (countdownSeconds > 0) {
+      countdownCancelRef.current = false;
+      setRecordingStatus(`Get ready. Recording starts in ${countdownSeconds} seconds.`);
+      for (let remaining = countdownSeconds; remaining > 0; remaining -= 1) {
+        if (countdownCancelRef.current) {
+          return;
+        }
+        setCountdownValue(remaining);
+        playCountdownCue();
+        await wait(1000);
+      }
+      if (countdownCancelRef.current) {
+        return;
+      }
+      setCountdownValue(null);
+    }
+
+    await beginRecordingClip({ playStartCue: countdownSeconds > 0 });
+  }
+
+  async function beginRecordingClip({ playStartCue = false } = {}) {
+    if (!cameraRef.current || recording) {
+      return;
+    }
+
     setRecording(true);
+    if (playStartCue) {
+      playCountdownStartCue();
+    }
+    const recordingSourceOrientation = landscapeViewport ? "landscape" : "portrait";
     setRecordingStatus("Recording in progress...");
 
     try {
@@ -853,6 +1017,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           mimeType: "video/mp4",
         });
         setVideoSource("camera");
+        setSourceOrientation(recordingSourceOrientation);
         setCameraOpen(true);
         setRecordingStatus("Recorded clip ready for coaching analysis.");
         resetRunState();
@@ -876,8 +1041,20 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
     setRecordingStatus("Finishing clip...");
   }
 
+  function toggleCameraFacing() {
+    if (recording || countdownValue !== null || busyWithAnalysis) {
+      return;
+    }
+    hapticSelection();
+    setCameraFacing((current) => {
+      const nextFacing = current === "back" ? "front" : "back";
+      setRecordingStatus(`${nextFacing === "front" ? "Front" : "Back"} camera ready.`);
+      return nextFacing;
+    });
+  }
+
   async function toggleCameraPower() {
-    if (recording) {
+    if (recording || countdownValue !== null) {
       return;
     }
 
@@ -968,6 +1145,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         overlayMode,
         testMode,
         userKey,
+        sourceOrientation,
         abortSignal: abortController.signal,
         onUploadProgress: (value) => setUploadProgress(clampPercent(value)),
       });
@@ -1029,13 +1207,18 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const backendUnavailable = backendStatus.ready === false;
   const displayedProgress = clampPercent(progress);
   const displayedUploadProgress = clampPercent(uploadProgress);
+  const countdownActive = countdownValue !== null;
+  const sideCaptureControlsDisabled = busyWithAnalysis || recording || countdownActive;
+  const cameraFacingLabel = cameraFacing === "front" ? "Front" : "Back";
+  const sourceOrientationLabel =
+    sourceOrientation === "landscape" ? "Landscape" : sourceOrientation === "portrait" ? "Portrait" : "Auto";
   const recordButtonDisabled =
     busyWithAnalysis ||
     (cameraOpen && !cameraPermission?.granted) ||
     cameraStarting ||
     cameraTrouble ||
     recordingStatus === "Finishing clip...";
-  const recordButtonAction = recording ? stopRecordingClip : cameraOpen ? startRecordingClip : openCameraRecorder;
+  const recordButtonAction = countdownActive ? cancelRecordingCountdown : recording ? stopRecordingClip : cameraOpen ? startRecordingClip : openCameraRecorder;
   const bottomModeTrayOpen = cameraStageHeight < collapsedCameraHeight - 40;
   const trainingMenuBottomOffset = bottomModeTrayOpen ? 104 : 118;
   const trainingMenuMaxHeight = Math.max(88, cameraStageHeight - trainingMenuBottomOffset - 96);
@@ -1053,7 +1236,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
               style={StyleSheet.absoluteFill}
               mode="video"
               mute
-              facing="back"
+              facing={cameraFacing}
               videoQuality="720p"
             />
             {cameraStarting || cameraTrouble ? (
@@ -1109,6 +1292,13 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         {recording ? (
           <View style={cameraStyles.recordingPill}>
             <Text style={cameraStyles.recordingText}>REC</Text>
+          </View>
+        ) : null}
+
+        {countdownActive ? (
+          <View style={cameraStyles.countdownOverlay} pointerEvents="none">
+            <Text style={cameraStyles.countdownNumber}>{countdownValue}</Text>
+            <Text style={cameraStyles.countdownLabel}>Get ready</Text>
           </View>
         ) : null}
 
@@ -1228,6 +1418,20 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         ) : null}
 
         <View style={cameraStyles.captureTray}>
+          <View style={cameraStyles.captureSideSlot}>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              accessibilityLabel="Open session history"
+              onPress={() => {
+                hapticSelection();
+                navigation.navigate("SessionHistory");
+              }}
+              disabled={sideCaptureControlsDisabled}
+              style={[cameraStyles.captureSideButton, sideCaptureControlsDisabled && cameraStyles.disabledControl]}
+            >
+              <Feather name="clock" size={19} color={colors.text} />
+            </TouchableOpacity>
+          </View>
           <TouchableOpacity
             activeOpacity={0.85}
             onPress={recordButtonAction}
@@ -1240,6 +1444,17 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           >
             <View style={[cameraStyles.recordButtonInner, recording && cameraStyles.recordButtonStop]} />
           </TouchableOpacity>
+          <View style={cameraStyles.captureSideSlot}>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              accessibilityLabel={`Switch camera. Current camera: ${cameraFacingLabel}`}
+              onPress={toggleCameraFacing}
+              disabled={sideCaptureControlsDisabled}
+              style={[cameraStyles.captureSideButton, sideCaptureControlsDisabled && cameraStyles.disabledControl]}
+            >
+              <Feather name="rotate-cw" size={19} color={colors.text} />
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
 
@@ -1328,6 +1543,34 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
             <Text style={cameraStyles.clipHelp}>
               Record or upload a clip. The backend analyzes it with YOLOv11 basketball detection and MediaPipe pose tracking.
             </Text>
+            <View style={cameraStyles.orientationPanel}>
+              <Text style={cameraStyles.orientationLabel}>Clip Orientation</Text>
+              {videoSource === "upload" ? (
+                <View style={cameraStyles.orientationChoiceRow}>
+                  {SOURCE_ORIENTATION_OPTIONS.map((option) => {
+                    const active = sourceOrientation === option.id;
+                    return (
+                      <TouchableOpacity
+                        key={option.id}
+                        activeOpacity={0.9}
+                        onPress={() => {
+                          hapticSelection();
+                          setSourceOrientation(option.id);
+                        }}
+                        disabled={busyWithAnalysis}
+                        style={[cameraStyles.orientationPill, active && cameraStyles.orientationPillActive]}
+                      >
+                        <Text style={[cameraStyles.orientationPillText, active && cameraStyles.orientationPillTextActive]}>
+                          {option.title}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ) : (
+                <Text style={cameraStyles.orientationValue}>{sourceOrientationLabel}</Text>
+              )}
+            </View>
             <View style={cameraStyles.backendStatusRow}>
               <View
                 style={[
@@ -1503,7 +1746,12 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         {resultVideoUrl ? (
           <>
             <View style={cameraStyles.resultVideoFrame}>
-              <ResultVideoPlayer videoUrl={resultVideoUrl} reviewEvents={reviewMoments} />
+              <ResultVideoPlayer
+                videoUrl={resultVideoUrl}
+                reviewEvents={reviewMoments}
+                outputWidth={coachingResults.outputWidth}
+                outputHeight={coachingResults.outputHeight}
+              />
             </View>
             <PrimaryButton title="Download Video" onPress={openResultVideo} />
           </>
@@ -1531,7 +1779,14 @@ function SetupGuidePanel({ guide }) {
       <View style={cameraStyles.poseReferenceCard}>
         <Text style={cameraStyles.poseReferenceTitle}>{guide.poseCardTitle}</Text>
         <Text style={cameraStyles.poseReferenceHeadline}>{guide.poseHeadline}</Text>
-        <Image source={guide.image} accessibilityLabel={guide.imageAlt} style={cameraStyles.poseReferenceImage} resizeMode="contain" />
+        <View style={cameraStyles.poseReferenceImage}>
+          <MotionGuideCard
+            source={guide.image}
+            accessibilityLabel={guide.imageAlt}
+            phases={guide.motionGuide?.phases}
+            height={190}
+          />
+        </View>
         {guide.poseCues.map((cue) => (
           <View key={cue} style={cameraStyles.poseCueRow}>
             <View style={cameraStyles.poseCueDot} />
@@ -1673,9 +1928,24 @@ function ShotReviewPanel({ shotEvents, reviewLevel }) {
               <Text style={cameraStyles.shotReviewTime}>{formatShotTime(resultTime)}</Text>
               <View style={cameraStyles.shotReviewMetaRow}>
                 <Text style={cameraStyles.shotReviewMetaPill}>Jump: {formatShotTime(event.reviewSeconds)}</Text>
+                {event.resultQuality ? (
+                  <Text style={[cameraStyles.shotReviewMetaPill, { color: resultQualityColor(event.resultQuality) }]}>
+                    Quality: {formatResultQuality(event.resultQuality)}
+                  </Text>
+                ) : null}
               </View>
               <Text style={cameraStyles.shotReviewText}>{shotFeedbackText(event.result, reviewLevel)}</Text>
               <Text style={cameraStyles.shotReviewReason}>{shotReasonText(event, reviewLevel)}</Text>
+              {event.evidence.length ? (
+                <View style={cameraStyles.shotEvidenceList}>
+                  {event.evidence.slice(0, 3).map((item) => (
+                    <View key={`${event.shotNumber}-${item}`} style={cameraStyles.shotEvidenceRow}>
+                      <View style={cameraStyles.shotEvidenceDot} />
+                      <Text style={cameraStyles.shotEvidenceText}>{item}</Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
             </View>
           );
         })}
@@ -1726,7 +1996,7 @@ function ModeReviewPanel({ review, reviewLevel, miniGoalsEnabled }) {
   );
 }
 
-function ResultVideoPlayer({ videoUrl, reviewEvents = [] }) {
+function ResultVideoPlayer({ videoUrl, reviewEvents = [], outputWidth = 0, outputHeight = 0 }) {
   const player = useVideoPlayer(
     {
       uri: videoUrl,
@@ -1739,6 +2009,8 @@ function ResultVideoPlayer({ videoUrl, reviewEvents = [] }) {
   );
   const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
   const videoMoments = Array.isArray(reviewEvents) ? reviewEvents : [];
+  const outputIsLandscape = Number(outputWidth || 0) > Number(outputHeight || 0);
+  const videoHeight = outputIsLandscape ? 220 : 340;
 
   function jumpToMoment(event) {
     hapticSelection();
@@ -1749,7 +2021,7 @@ function ResultVideoPlayer({ videoUrl, reviewEvents = [] }) {
   return (
     <View>
       <VideoView
-        style={{ width: "100%", height: 320, backgroundColor: "#040b15" }}
+        style={{ width: "100%", height: videoHeight, backgroundColor: "#040b15" }}
         player={player}
         nativeControls
         allowsFullscreen
@@ -1941,6 +2213,28 @@ const cameraStyles = StyleSheet.create({
     fontWeight: "900",
     fontSize: 12,
   },
+  countdownOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(4, 11, 21, 0.24)",
+  },
+  countdownNumber: {
+    color: colors.text,
+    fontSize: 82,
+    fontWeight: "900",
+  },
+  countdownLabel: {
+    marginTop: 4,
+    color: colors.primary,
+    fontSize: 14,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
   modeMenu: {
     position: "absolute",
     left: 14,
@@ -2106,6 +2400,22 @@ const cameraStyles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+    gap: 16,
+  },
+  captureSideSlot: {
+    width: 64,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  captureSideButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.overlay,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   recordButton: {
     width: 82,
@@ -2307,6 +2617,46 @@ const cameraStyles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "800",
   },
+  orientationPanel: {
+    marginTop: 12,
+    gap: 8,
+  },
+  orientationLabel: {
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  orientationChoiceRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  orientationPill: {
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: colors.backgroundSoft,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  orientationPillActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  orientationPillText: {
+    color: colors.text,
+    fontSize: 11,
+    fontWeight: "900",
+  },
+  orientationPillTextActive: {
+    color: "#091220",
+  },
+  orientationValue: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+  },
   setupGuidePanel: {
     marginTop: 14,
     borderRadius: 16,
@@ -2362,12 +2712,7 @@ const cameraStyles = StyleSheet.create({
   },
   poseReferenceImage: {
     width: "100%",
-    height: 190,
     marginTop: 12,
-    borderRadius: 14,
-    backgroundColor: colors.backgroundSoft,
-    borderWidth: 1,
-    borderColor: colors.border,
   },
   poseCueRow: {
     marginTop: 8,
@@ -2652,6 +2997,29 @@ const cameraStyles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
     fontWeight: "800",
+  },
+  shotEvidenceList: {
+    marginTop: 8,
+    gap: 6,
+  },
+  shotEvidenceRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 7,
+  },
+  shotEvidenceDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    marginTop: 6,
+    backgroundColor: colors.secondary,
+  },
+  shotEvidenceText: {
+    flex: 1,
+    color: colors.muted,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: "700",
   },
   modeReviewPanel: {
     marginTop: 16,

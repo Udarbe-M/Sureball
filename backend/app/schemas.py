@@ -19,6 +19,7 @@ ShotTrainingOverlayMode = Literal["full_tracking", "focus_stats", "stats_only"]
 ShotTrainingStatus = Literal["queued", "processing", "completed", "error", "cancelled", "not_found"]
 CoachingVideoOverlayMode = Literal["full_overlay", "focus_feedback", "score_only"]
 CoachingVideoStatus = Literal["queued", "processing", "completed", "error", "cancelled", "not_found"]
+SourceOrientation = Literal["auto", "portrait", "landscape"]
 
 
 class Point2D(BaseModel):
@@ -135,6 +136,9 @@ class ShotEvent(BaseModel):
     start_frame: int = 0
     result_timestamp_seconds: Optional[float] = None
     result_frame: Optional[int] = None
+    result_quality: Optional[str] = None
+    result_reason: Optional[str] = None
+    evidence: List[str] = Field(default_factory=list)
 
 
 class ShotTrainingStartResponse(BaseModel):
@@ -142,6 +146,7 @@ class ShotTrainingStartResponse(BaseModel):
     status: ShotTrainingStatus
     overlay_mode: ShotTrainingOverlayMode
     test_mode: bool = False
+    source_orientation: SourceOrientation = "auto"
 
 
 class ShotTrainingStatusResponse(BaseModel):
@@ -149,9 +154,16 @@ class ShotTrainingStatusResponse(BaseModel):
     status: ShotTrainingStatus
     overlay_mode: Optional[ShotTrainingOverlayMode] = None
     test_mode: bool = False
+    source_orientation: Optional[SourceOrientation] = None
     processed_frames: int = 0
     total_frames: int = 0
     progress_percentage: int = 0
+    input_width: int = 0
+    input_height: int = 0
+    output_width: int = 0
+    output_height: int = 0
+    input_orientation: str = "unknown"
+    output_orientation: str = "unknown"
     stats: ShotTrainingStats = Field(default_factory=ShotTrainingStats)
     shot_events: List[ShotEvent] = Field(default_factory=list)
     classification: Optional[str] = None
@@ -165,6 +177,7 @@ class CoachingVideoStartResponse(BaseModel):
     status: CoachingVideoStatus
     overlay_mode: CoachingVideoOverlayMode
     test_mode: bool = False
+    source_orientation: SourceOrientation = "auto"
 
 
 class CoachingVideoStatusResponse(BaseModel):
@@ -173,9 +186,16 @@ class CoachingVideoStatusResponse(BaseModel):
     status: CoachingVideoStatus
     overlay_mode: Optional[CoachingVideoOverlayMode] = None
     test_mode: bool = False
+    source_orientation: Optional[SourceOrientation] = None
     processed_frames: int = 0
     total_frames: int = 0
     progress_percentage: int = 0
+    input_width: int = 0
+    input_height: int = 0
+    output_width: int = 0
+    output_height: int = 0
+    input_orientation: str = "unknown"
+    output_orientation: str = "unknown"
     analyzed_frames: int = 0
     pose_frames: int = 0
     ball_frames: int = 0

@@ -28,6 +28,7 @@ TEST_MODE_SECONDS = 15
 SHOT_COOLDOWN_SECONDS = 1.2
 MAKE_COOLDOWN_SECONDS = 1.6
 POST_MAKE_SHOT_SUPPRESSION_SECONDS = 0.45
+HOOP_ONLY_MAKE_DUPLICATE_SECONDS = 2.4
 MAKE_BANNER_SECONDS = 1.0
 ATTEMPT_CONFIRMATION_FRAMES = 2
 ATTEMPT_RESULT_WINDOW_SECONDS = 3.0
@@ -248,19 +249,63 @@ def _read_capture_orientation(capture: cv2.VideoCapture) -> int:
         return 0
 
 
+def _normalize_source_orientation(source_orientation: str) -> str:
+    normalized = str(source_orientation or "auto").strip().lower()
+    return normalized if normalized in {"auto", "portrait", "landscape"} else "auto"
+
+
+def _orientation_label(width: int, height: int) -> str:
+    if width <= 0 or height <= 0:
+        return "unknown"
+    if width > height:
+        return "landscape"
+    if height > width:
+        return "portrait"
+    return "square"
+
+
+def _frame_matches_source_orientation(frame: np.ndarray, source_orientation: str) -> bool:
+    frame_height, frame_width = frame.shape[:2]
+    if source_orientation == "landscape":
+        return frame_width >= frame_height
+    if source_orientation == "portrait":
+        return frame_height >= frame_width
+    return True
+
+
+def _rotate_for_orientation(frame: np.ndarray, orientation_degrees: int, *, inverse: bool = False) -> np.ndarray:
+    normalized_orientation = orientation_degrees % 360
+    if inverse:
+        normalized_orientation = (-normalized_orientation) % 360
+    rotation_map = {
+        90: cv2.ROTATE_90_CLOCKWISE,
+        180: cv2.ROTATE_180,
+        270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+    }
+    rotate_code = rotation_map.get(normalized_orientation)
+    if rotate_code is None:
+        return frame
+    return cv2.rotate(frame, rotate_code)
+
+
 def _apply_orientation_correction(
     frame: np.ndarray,
     orientation_degrees: int,
     *,
     auto_orientation_enabled: bool,
     encoded_frame_size: tuple[int, int],
+    source_orientation: str = "auto",
 ) -> np.ndarray:
     normalized_orientation = orientation_degrees % 360
-    if normalized_orientation == 0:
-        return frame
-
     frame_height, frame_width = frame.shape[:2]
     encoded_width, encoded_height = encoded_frame_size
+
+    source_orientation = _normalize_source_orientation(source_orientation)
+    corrected = frame
+    if normalized_orientation == 0:
+        if source_orientation == "auto" or _frame_matches_source_orientation(corrected, source_orientation):
+            return corrected
+        return cv2.rotate(corrected, cv2.ROTATE_90_CLOCKWISE)
 
     # OpenCV may expose the raw encoded frame while mobile players rely on rotation metadata.
     # If auto-rotation was not applied, normalize frames ourselves before analysis/export.
@@ -273,18 +318,18 @@ def _apply_orientation_correction(
             and encoded_height > 0
         )
 
-    if not needs_manual_rotation:
-        return frame
+    if needs_manual_rotation:
+        corrected = _rotate_for_orientation(frame, normalized_orientation)
 
-    rotation_map = {
-        90: cv2.ROTATE_90_CLOCKWISE,
-        180: cv2.ROTATE_180,
-        270: cv2.ROTATE_90_COUNTERCLOCKWISE,
-    }
-    rotate_code = rotation_map.get(normalized_orientation)
-    if rotate_code is None:
-        return frame
-    return cv2.rotate(frame, rotate_code)
+    if source_orientation == "auto" or _frame_matches_source_orientation(corrected, source_orientation):
+        return corrected
+
+    if normalized_orientation in {90, 270}:
+        candidate = _rotate_for_orientation(corrected, normalized_orientation, inverse=auto_orientation_enabled)
+        if _frame_matches_source_orientation(candidate, source_orientation):
+            return candidate
+
+    return cv2.rotate(corrected, cv2.ROTATE_90_CLOCKWISE)
 
 
 class ShotTrainingTracker:
@@ -314,6 +359,10 @@ class ShotTrainingTracker:
         self.post_make_shot_suppression_frames = max(
             2,
             int(self.fps * POST_MAKE_SHOT_SUPPRESSION_SECONDS),
+        )
+        self.hoop_only_make_duplicate_frames = max(
+            2,
+            int(self.fps * HOOP_ONLY_MAKE_DUPLICATE_SECONDS),
         )
         self.banner_duration_frames = max(10, int(self.fps * MAKE_BANNER_SECONDS))
         self.attempt_confirmation_frames = max(1, ATTEMPT_CONFIRMATION_FRAMES)
@@ -363,7 +412,12 @@ class ShotTrainingTracker:
         }
 
     def to_shot_events(self) -> list[dict[str, object]]:
-        return [event.copy() for event in self.shot_events]
+        events: list[dict[str, object]] = []
+        for event in self.shot_events:
+            item = event.copy()
+            item["evidence"] = list(item.get("evidence") or [])
+            events.append(item)
+        return events
 
     def observe(self, detections: list[Dict[str, float | str]], frame_index: int) -> None:
         basket_detection = _best_detection(detections, "basket")
@@ -391,7 +445,6 @@ class ShotTrainingTracker:
         if direct_make_valid:
             self.direct_make_streak += 1
             self.recent_direct_make_frames.append(frame_index)
-            self.last_rim_entry_frame = frame_index
         else:
             self.direct_make_streak = 0
         self._prune_direct_make_frames(frame_index)
@@ -440,6 +493,16 @@ class ShotTrainingTracker:
             and ball_detection is not None
             and _ball_under_basket(_detection_center(ball_detection), basket_context)
         )
+        recent_ball_above_rim = (
+            basket_context is not None
+            and tracked_ball is not None
+            and _has_recent_ball_above_rim(
+                basket_context,
+                recent_ball_positions=self.recent_ball_positions,
+                current_frame=frame_index,
+                recent_frame_window=self.recent_rim_sequence_frames,
+            )
+        )
         basket_overlap_pass_confirmed = basket_overlap_confirmed and (
             self._recent_basket_pass(frame_index) or ball_under_basket
         )
@@ -449,22 +512,45 @@ class ShotTrainingTracker:
             and self._recent_shot_signal(frame_index)
             and _ball_above_rim(_detection_center(ball_detection), basket_context)
         )
-        current_hoop_make_evidence = (
-            direct_make_confirmed
-            or basket_overlap_pass_confirmed
-            or sustained_basket_overlap_confirmed
-            or single_frame_hoop_make
+        hoop_make_confirmed = (
+            basket_overlap_pass_confirmed
             or self._recent_basket_pass(frame_index)
+        )
+        current_hoop_make_evidence = hoop_make_confirmed
+        attempt_evidence = _attempt_evidence(
+            shot_signal=self._recent_shot_signal(frame_index),
+            basket_visible=basket_context is not None,
+            ball_visible=ball_detection is not None,
+            release_seen=shot_release_evidence,
+        )
+        make_evidence = _make_evidence(
+            direct_make_confirmed=direct_make_confirmed,
+            basket_overlap_pass_confirmed=basket_overlap_pass_confirmed,
+            sustained_basket_overlap_confirmed=sustained_basket_overlap_confirmed,
+            single_frame_hoop_make=single_frame_hoop_make,
+            recent_basket_pass=self._recent_basket_pass(frame_index),
+            recent_pre_attempt_make=self._recent_pre_attempt_make(frame_index),
+            basket_visible=basket_context is not None,
+            ball_visible=ball_detection is not None or direct_make_detection is not None,
         )
 
         if self._should_rollover_active_attempt(frame_index) and not current_hoop_make_evidence:
+            miss_evidence = _miss_evidence(
+                "new shot started before prior result",
+                basket_visible=basket_context is not None,
+                ball_visible=ball_detection is not None,
+                shot_signal=True,
+            )
             self._resolve_attempt(
                 frame_index,
                 made=False,
                 banner_text="Miss recorded",
                 recovery_keeps_active=True,
+                evidence=miss_evidence,
+                result_reason=_shot_result_reason(False, miss_evidence),
+                result_quality=_shot_result_quality(False, miss_evidence),
             )
-            self._start_attempt(frame_index, "Shot attempt detected")
+            self._start_attempt(frame_index, "Shot attempt detected", evidence=attempt_evidence)
 
         if (
             self.active_attempt_frame is None
@@ -475,63 +561,79 @@ class ShotTrainingTracker:
             and not self._recent_make_duplicate_shot(frame_index)
             and frame_index - self.last_hoop_only_make_frame >= self.make_cooldown_frames
         ):
-            self._start_attempt(frame_index, "Shot attempt detected")
+            self._start_attempt(frame_index, "Shot attempt detected", evidence=attempt_evidence)
             self.pending_shot_streak = 0
 
         if (
             can_score_make
             and self.active_attempt_frame is None
-            and (
-                basket_overlap_pass_confirmed
-                or sustained_basket_overlap_confirmed
-                or self._recent_basket_pass(frame_index)
-            )
+            and not self._recent_make_duplicate_hoop_only(frame_index)
+            and hoop_make_confirmed
+            and (direct_make_confirmed or self._recent_shot_signal(frame_index))
         ):
             self.last_pre_attempt_make_frame = frame_index
             self.last_hoop_only_make_frame = frame_index
-            self._start_attempt(frame_index, "Made basket detected")
+            self._start_attempt(frame_index, "Made basket detected", evidence=_unique_evidence(["hoop result detected before shooting pose"] + make_evidence))
 
         if (
             can_score_make
             and self.active_attempt_frame is None
+            and not self._recent_make_duplicate_hoop_only(frame_index)
             and direct_make_valid
-            and (direct_make_confirmed or single_frame_hoop_make)
+            and self._recent_basket_pass(frame_index)
+            and (direct_make_confirmed or self._recent_shot_signal(frame_index))
         ):
             self.last_pre_attempt_make_frame = frame_index
             self.last_hoop_only_make_frame = frame_index
-            self._start_attempt(frame_index, "Made basket detected")
+            self._start_attempt(frame_index, "Made basket detected", evidence=_unique_evidence(["hoop result detected before shooting pose"] + make_evidence))
 
         recovered_late_make = False
         if can_score_make and (
-            direct_make_confirmed
-            or self._recent_basket_pass(frame_index)
+            self._recent_basket_pass(frame_index)
             or basket_overlap_pass_confirmed
-            or sustained_basket_overlap_confirmed
         ):
-            recovered_late_make = self._recover_recent_miss_as_make(frame_index)
+            recovered_late_make = self._recover_recent_miss_as_make(frame_index, evidence=make_evidence)
 
         if (
             can_score_make
             and not recovered_late_make
             and self.active_attempt_frame is not None
             and (
-                direct_make_confirmed
-                or self._recent_basket_pass(frame_index)
+                self._recent_basket_pass(frame_index)
                 or basket_overlap_pass_confirmed
-                or sustained_basket_overlap_confirmed
                 or self._recent_pre_attempt_make(frame_index)
             )
         ):
             self.makes += 1
             self.last_make_frame = frame_index
-            self._resolve_attempt(frame_index, made=True, banner_text="Made basket detected")
+            self._resolve_attempt(
+                frame_index,
+                made=True,
+                banner_text="Made basket detected",
+                evidence=make_evidence,
+                result_reason=_shot_result_reason(True, make_evidence),
+                result_quality=_shot_result_quality(True, make_evidence),
+            )
         self.direct_make_detection_active = direct_make_detection is not None
 
         if (
             self.active_attempt_frame is not None
             and frame_index - self.active_attempt_frame >= self.attempt_result_window_frames
         ):
-            self._resolve_attempt(frame_index, made=False, banner_text="Miss recorded")
+            miss_evidence = _miss_evidence(
+                "result window expired",
+                basket_visible=basket_context is not None,
+                ball_visible=ball_detection is not None,
+                shot_signal=self._recent_shot_signal(frame_index),
+            )
+            self._resolve_attempt(
+                frame_index,
+                made=False,
+                banner_text="Miss recorded",
+                evidence=miss_evidence,
+                result_reason=_shot_result_reason(False, miss_evidence),
+                result_quality=_shot_result_quality(False, miss_evidence),
+            )
 
     def _set_banner(self, text: str, frame_index: int) -> None:
         self.banner_text = text
@@ -578,6 +680,9 @@ class ShotTrainingTracker:
     def _recent_make_duplicate_shot(self, frame_index: int) -> bool:
         return frame_index - self.last_make_frame < self.post_make_shot_suppression_frames
 
+    def _recent_make_duplicate_hoop_only(self, frame_index: int) -> bool:
+        return frame_index - self.last_make_frame < self.hoop_only_make_duplicate_frames
+
     def _should_rollover_active_attempt(self, frame_index: int) -> bool:
         if self.active_attempt_frame is None:
             return False
@@ -591,7 +696,7 @@ class ShotTrainingTracker:
             return False
         return True
 
-    def _recover_recent_miss_as_make(self, frame_index: int) -> bool:
+    def _recover_recent_miss_as_make(self, frame_index: int, *, evidence: Optional[list[str]] = None) -> bool:
         if (
             self.misses <= 0
             or not self.last_miss_can_recover
@@ -616,12 +721,18 @@ class ShotTrainingTracker:
         self.last_miss_can_recover = False
         self.last_miss_recovery_keeps_active = False
         self.pending_shot_streak = 0
+        recovery_evidence = _unique_evidence(["late make recovered after rim bounce"] + list(evidence or []))
         if self.last_miss_event_index is not None and 0 <= self.last_miss_event_index < len(self.shot_events):
+            existing_evidence = list(self.shot_events[self.last_miss_event_index].get("evidence") or [])
+            combined_evidence = _unique_evidence(existing_evidence + recovery_evidence)
             self.shot_events[self.last_miss_event_index].update(
                 {
                     "result": "make",
                     "result_frame": frame_index,
                     "result_timestamp_seconds": round(frame_index / self.fps, 2),
+                    "result_quality": _shot_result_quality(True, combined_evidence),
+                    "result_reason": _shot_result_reason(True, combined_evidence),
+                    "evidence": combined_evidence,
                 }
             )
         if drop_active_event:
@@ -646,17 +757,21 @@ class ShotTrainingTracker:
         ):
             self.recent_basket_overlap_frames.popleft()
 
-    def _start_attempt(self, frame_index: int, banner_text: str) -> None:
+    def _start_attempt(self, frame_index: int, banner_text: str, *, evidence: Optional[list[str]] = None) -> None:
         self.attempts += 1
         self.last_attempt_frame = frame_index
         self.active_attempt_frame = frame_index
         self.active_attempt_event_index = len(self.shot_events)
+        attempt_evidence = _unique_evidence(evidence or [])
         self.shot_events.append(
             {
                 "shot_number": self.attempts,
                 "result": "pending",
                 "start_frame": frame_index,
                 "timestamp_seconds": round(frame_index / self.fps, 2),
+                "result_quality": None,
+                "result_reason": "Attempt detected; waiting for hoop result.",
+                "evidence": attempt_evidence,
             }
         )
         self.awaiting_shot_reset = True
@@ -674,16 +789,24 @@ class ShotTrainingTracker:
         *,
         allow_late_recovery: bool = True,
         recovery_keeps_active: bool = False,
+        evidence: Optional[list[str]] = None,
+        result_reason: Optional[str] = None,
+        result_quality: Optional[str] = None,
     ) -> None:
         if self.active_attempt_frame is None:
             return
         event_index = self.active_attempt_event_index
         if event_index is not None and 0 <= event_index < len(self.shot_events):
+            existing_evidence = list(self.shot_events[event_index].get("evidence") or [])
+            combined_evidence = _unique_evidence(existing_evidence + list(evidence or []))
             self.shot_events[event_index].update(
                 {
                     "result": "make" if made else "miss",
                     "result_frame": frame_index,
                     "result_timestamp_seconds": round(frame_index / self.fps, 2),
+                    "result_quality": result_quality or _shot_result_quality(made, combined_evidence),
+                    "result_reason": result_reason or _shot_result_reason(made, combined_evidence),
+                    "evidence": combined_evidence,
                 }
             )
         if not made:
@@ -723,7 +846,15 @@ class ShotTrainingTracker:
         if self.active_attempt_frame is None:
             return
         if final_frame_index - self.active_attempt_frame >= self.pending_attempt_finalize_frames:
-            self._resolve_attempt(final_frame_index, made=False, banner_text="Miss recorded")
+            evidence = _miss_evidence("clip ended before clear hoop result")
+            self._resolve_attempt(
+                final_frame_index,
+                made=False,
+                banner_text="Miss recorded",
+                evidence=evidence,
+                result_reason=_shot_result_reason(False, evidence),
+                result_quality=_shot_result_quality(False, evidence),
+            )
             return
         self.discard_pending_attempt()
 
@@ -738,6 +869,143 @@ class ShotTrainingTracker:
             event["shot_number"] = index
 
 
+def _unique_evidence(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _attempt_evidence(
+    *,
+    shot_signal: bool,
+    basket_visible: bool,
+    ball_visible: bool,
+    release_seen: bool,
+) -> list[str]:
+    evidence: list[str] = []
+    if shot_signal:
+        evidence.append("shooting motion detected")
+    if basket_visible:
+        evidence.append("basket visible")
+    if ball_visible:
+        evidence.append("ball visible")
+    if release_seen:
+        evidence.append("ball above rim at release")
+    return _unique_evidence(evidence)
+
+
+def _make_evidence(
+    *,
+    direct_make_confirmed: bool,
+    basket_overlap_pass_confirmed: bool,
+    sustained_basket_overlap_confirmed: bool,
+    single_frame_hoop_make: bool,
+    recent_basket_pass: bool,
+    recent_pre_attempt_make: bool,
+    basket_visible: bool,
+    ball_visible: bool,
+) -> list[str]:
+    evidence: list[str] = []
+    if basket_visible:
+        evidence.append("basket visible")
+    if ball_visible:
+        evidence.append("ball visible")
+    if direct_make_confirmed:
+        evidence.append("ball-in-basket confirmed across frames")
+    if basket_overlap_pass_confirmed:
+        evidence.append("ball entered hoop and passed below rim")
+    if sustained_basket_overlap_confirmed:
+        evidence.append("ball overlapped basket core across frames")
+    if single_frame_hoop_make:
+        evidence.append("single-frame hoop confirmation")
+    if recent_basket_pass:
+        evidence.append("recent ball path under basket")
+    if recent_pre_attempt_make:
+        evidence.append("recent hoop result before attempt")
+    return _unique_evidence(evidence)
+
+
+def _miss_evidence(
+    reason: str,
+    *,
+    basket_visible: bool = False,
+    ball_visible: bool = False,
+    shot_signal: bool = False,
+) -> list[str]:
+    evidence = [reason]
+    if shot_signal:
+        evidence.append("shooting motion detected")
+    if basket_visible:
+        evidence.append("basket visible")
+    if ball_visible:
+        evidence.append("ball visible")
+    evidence.append("no confirmed ball-through-hoop result")
+    return _unique_evidence(evidence)
+
+
+def _shot_result_quality(made: bool, evidence: list[str]) -> str:
+    evidence_set = set(evidence)
+    if made:
+        if (
+            "ball entered hoop and passed below rim" in evidence_set
+            and (
+                "ball-in-basket confirmed across frames" in evidence_set
+                or "recent ball path under basket" in evidence_set
+            )
+        ):
+            return "high"
+        if (
+            "recent ball path under basket" in evidence_set
+            and "basket visible" in evidence_set
+            and "ball visible" in evidence_set
+        ):
+            return "high"
+        if (
+            "ball-in-basket confirmed across frames" in evidence_set
+            or "ball overlapped basket core across frames" in evidence_set
+            or "recent ball path under basket" in evidence_set
+        ):
+            return "medium"
+        return "low"
+
+    if (
+        "result window expired" in evidence_set
+        and "shooting motion detected" in evidence_set
+        and "basket visible" in evidence_set
+    ):
+        return "medium"
+    return "low"
+
+
+def _shot_result_reason(made: bool, evidence: list[str]) -> str:
+    evidence_set = set(evidence)
+    if made:
+        if "late make recovered after rim bounce" in evidence_set:
+            return "Recovered as a make because a late hoop result appeared after the miss window."
+        if "ball entered hoop and passed below rim" in evidence_set:
+            return "Counted as a make because the ball entered the hoop area and continued below the rim."
+        if "recent ball path under basket" in evidence_set:
+            return "Counted as a make because the ball was tracked below the basket after rim entry."
+        if "ball-in-basket confirmed across frames" in evidence_set:
+            return "Counted as a make because the ball-in-basket detection was confirmed across frames."
+        if "ball overlapped basket core across frames" in evidence_set:
+            return "Counted as a make because the ball stayed inside the basket core across frames."
+        if "single-frame hoop confirmation" in evidence_set:
+            return "Counted as a make from a single clear hoop confirmation with the ball inside the rim."
+        return "Counted as a make from available hoop-entry evidence."
+
+    if "new shot started before prior result" in evidence_set:
+        return "Counted as a miss because a new shot started before the previous attempt had a confirmed hoop result."
+    if "clip ended before clear hoop result" in evidence_set:
+        return "Counted as a miss because the clip ended before a clear hoop result was confirmed."
+    return "Counted as a miss because the result window ended without confirmed ball-through-hoop evidence."
+
+
 class ShotTrainingJob:
     def __init__(
         self,
@@ -748,6 +1016,7 @@ class ShotTrainingJob:
         overlay_mode: str,
         test_mode: bool,
         user_key: str,
+        source_orientation: str = "auto",
     ) -> None:
         self.file_id = file_id
         self.detector = detector
@@ -756,6 +1025,7 @@ class ShotTrainingJob:
         self.overlay_mode = overlay_mode
         self.test_mode = test_mode
         self.user_key = user_key
+        self.source_orientation = _normalize_source_orientation(source_orientation)
 
     def run(self) -> None:
         capture = cv2.VideoCapture(str(self.input_path))
@@ -790,8 +1060,10 @@ class ShotTrainingJob:
                 orientation_degrees,
                 auto_orientation_enabled=auto_orientation_enabled,
                 encoded_frame_size=(encoded_frame_width, encoded_frame_height),
+                source_orientation=self.source_orientation,
             )
             frame_height, frame_width = first_frame.shape[:2]
+            output_orientation = _orientation_label(frame_width, frame_height)
 
             writer = AnnotatedVideoWriter(
                 output_path=self.output_path,
@@ -806,6 +1078,12 @@ class ShotTrainingJob:
                 processed_frames=0,
                 total_frames=max_frames,
                 progress_percentage=0,
+                input_width=encoded_frame_width,
+                input_height=encoded_frame_height,
+                output_width=frame_width,
+                output_height=frame_height,
+                input_orientation=_orientation_label(encoded_frame_width, encoded_frame_height),
+                output_orientation=output_orientation,
                 stats=tracker.to_stats(),
                 shot_events=tracker.to_shot_events(),
             )
@@ -847,6 +1125,9 @@ class ShotTrainingJob:
                         processed_frames=frame_index,
                         total_frames=max_frames,
                         progress_percentage=int((frame_index / max(max_frames, 1)) * 100),
+                        output_width=frame_width,
+                        output_height=frame_height,
+                        output_orientation=output_orientation,
                         stats=tracker.to_stats(),
                         shot_events=tracker.to_shot_events(),
                     )
@@ -863,6 +1144,7 @@ class ShotTrainingJob:
                     orientation_degrees,
                     auto_orientation_enabled=auto_orientation_enabled,
                     encoded_frame_size=(encoded_frame_width, encoded_frame_height),
+                    source_orientation=self.source_orientation,
                 )
 
             writer.close()
@@ -907,6 +1189,9 @@ class ShotTrainingJob:
                 processed_frames=frame_index,
                 total_frames=max(frame_index, max_frames),
                 progress_percentage=100,
+                output_width=frame_width,
+                output_height=frame_height,
+                output_orientation=output_orientation,
                 stats=tracker.to_stats(),
                 shot_events=tracker.to_shot_events(),
                 summary=summary,
@@ -945,7 +1230,8 @@ class ShotTrainingJob:
             _draw_make_banner(frame, tracker.banner_text)
 
         _draw_scoreboard(frame, tracker)
-        _draw_frame_footer(frame, self.overlay_mode, self.test_mode)
+        if self.overlay_mode != "stats_only":
+            _draw_frame_footer(frame, self.overlay_mode, self.test_mode)
 
 
 def start_shot_training_job(
@@ -954,6 +1240,7 @@ def start_shot_training_job(
     overlay_mode: str,
     test_mode: bool,
     user_key: str,
+    source_orientation: str = "auto",
 ) -> dict[str, object]:
     ensure_shot_training_dirs()
 
@@ -971,9 +1258,16 @@ def start_shot_training_job(
             "status": "queued",
             "overlay_mode": overlay_mode,
             "test_mode": test_mode,
+            "source_orientation": _normalize_source_orientation(source_orientation),
             "processed_frames": 0,
             "total_frames": 0,
             "progress_percentage": 0,
+            "input_width": 0,
+            "input_height": 0,
+            "output_width": 0,
+            "output_height": 0,
+            "input_orientation": "unknown",
+            "output_orientation": "unknown",
             "stats": {"attempts": 0, "makes": 0, "misses": 0, "accuracy": 0.0},
             "shot_events": [],
             "classification": None,
@@ -991,6 +1285,7 @@ def start_shot_training_job(
         overlay_mode=overlay_mode,
         test_mode=test_mode,
         user_key=user_key,
+        source_orientation=source_orientation,
     )
     thread = threading.Thread(target=worker.run, daemon=True)
     thread.start()
@@ -1006,9 +1301,16 @@ def get_shot_training_status(file_id: str) -> dict[str, object]:
                 "status": "not_found",
                 "overlay_mode": None,
                 "test_mode": False,
+                "source_orientation": None,
                 "processed_frames": 0,
                 "total_frames": 0,
                 "progress_percentage": 0,
+                "input_width": 0,
+                "input_height": 0,
+                "output_width": 0,
+                "output_height": 0,
+                "input_orientation": "unknown",
+                "output_orientation": "unknown",
                 "stats": {"attempts": 0, "makes": 0, "misses": 0, "accuracy": 0.0},
                 "shot_events": [],
                 "classification": None,
@@ -1362,14 +1664,31 @@ def _draw_make_banner(frame: np.ndarray, text: str) -> None:
 
 def _draw_scoreboard(frame: np.ndarray, tracker: ShotTrainingTracker) -> None:
     height, width = frame.shape[:2]
-    panel_width = min(width - 32, 360)
-    panel_height = 110
+    landscape = width > height
+    panel_width = min(width - 32, 520 if landscape else 360)
+    panel_height = 82 if landscape else 110
     x = 16
     y = max(16, height - panel_height - 16)
     overlay = frame.copy()
     cv2.rectangle(overlay, (x, y), (x + panel_width, y + panel_height), (18, 22, 34), -1)
     cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
     cv2.rectangle(frame, (x, y), (x + panel_width, y + panel_height), (20, 105, 255), 2)
+
+    if landscape:
+        _draw_stat(frame, "ATTEMPTS", str(tracker.attempts), x + 18, y + 24, (255, 255, 255), value_scale=0.72)
+        _draw_stat(frame, "MAKES", str(tracker.makes), x + 142, y + 24, (60, 220, 100), value_scale=0.72)
+        _draw_stat(frame, "MISSES", str(tracker.misses), x + 242, y + 24, (255, 180, 80), value_scale=0.72)
+        cv2.putText(
+            frame,
+            f"ACC {tracker.accuracy:.1f}%",
+            (x + 356, y + 54),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.68,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        return
 
     _draw_stat(frame, "ATTEMPTS", str(tracker.attempts), x + 18, y + 30, (255, 255, 255))
     _draw_stat(frame, "MAKES", str(tracker.makes), x + 140, y + 30, (60, 220, 100))
@@ -1394,9 +1713,10 @@ def _draw_stat(
     x: int,
     y: int,
     color: tuple[int, int, int],
+    value_scale: float = 0.88,
 ) -> None:
     cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (165, 175, 200), 1, cv2.LINE_AA)
-    cv2.putText(frame, value, (x, y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.88, color, 2, cv2.LINE_AA)
+    cv2.putText(frame, value, (x, y + 28), cv2.FONT_HERSHEY_SIMPLEX, value_scale, color, 2, cv2.LINE_AA)
 
 
 def _draw_frame_footer(frame: np.ndarray, overlay_mode: str, test_mode: bool) -> None:

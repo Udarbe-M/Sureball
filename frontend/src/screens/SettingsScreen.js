@@ -3,13 +3,18 @@ import { Alert, ScrollView, Switch, Text, TouchableOpacity, View } from "react-n
 import { useAuth } from "../context/AuthContext";
 import { healthCheck } from "../services/api";
 import {
+  RECORDING_COUNTDOWN_OPTIONS,
   SESSION_HISTORY_LIMIT_OPTIONS,
   clearSavedSessionVideos,
   formatStorageBytes,
   getAutoSaveVideosPreference,
+  getRecordingCountdownSecondsPreference,
+  getRecordingCountdownSoundPreference,
   getSessionHistoryLimitPreference,
   getSessionStorageStats,
   setAutoSaveVideosPreference,
+  setRecordingCountdownSecondsPreference,
+  setRecordingCountdownSoundPreference,
   setSessionHistoryLimitPreference,
 } from "../services/storage";
 import { colors } from "../theme/colors";
@@ -27,6 +32,10 @@ export default function SettingsScreen({ navigation }) {
   const [savingAutoSave, setSavingAutoSave] = useState(false);
   const [historyLimit, setHistoryLimit] = useState(100);
   const [savingHistoryLimit, setSavingHistoryLimit] = useState(false);
+  const [recordingCountdownSeconds, setRecordingCountdownSeconds] = useState(3);
+  const [recordingCountdownSound, setRecordingCountdownSound] = useState(true);
+  const [savingCountdown, setSavingCountdown] = useState(false);
+  const [savingCountdownSound, setSavingCountdownSound] = useState(false);
   const [storageStats, setStorageStats] = useState({ bytes: 0, savedVideoCount: 0, sessionCount: 0 });
   const [storageMessage, setStorageMessage] = useState("");
   const [storageMessageTone, setStorageMessageTone] = useState("neutral");
@@ -57,12 +66,16 @@ export default function SettingsScreen({ navigation }) {
       getAutoSaveVideosPreference(userKey),
       getSessionHistoryLimitPreference(userKey),
       getSessionStorageStats(userKey),
+      getRecordingCountdownSecondsPreference(userKey),
+      getRecordingCountdownSoundPreference(userKey),
     ])
-      .then(([enabled, limit, stats]) => {
+      .then(([enabled, limit, stats, countdownSeconds, countdownSound]) => {
         if (mounted) {
           setAutoSaveVideos(enabled);
           setHistoryLimit(limit);
           setStorageStats(stats);
+          setRecordingCountdownSeconds(countdownSeconds);
+          setRecordingCountdownSound(countdownSound);
         }
       })
       .catch(() => {
@@ -118,6 +131,51 @@ export default function SettingsScreen({ navigation }) {
       Alert.alert("Setting not saved", String(error.message || error));
     } finally {
       setSavingHistoryLimit(false);
+    }
+  }
+
+  async function handleCountdownChange(seconds) {
+    if (savingCountdown || Number(seconds) === Number(recordingCountdownSeconds)) {
+      return;
+    }
+
+    const previousSeconds = recordingCountdownSeconds;
+    setRecordingCountdownSeconds(seconds);
+    setSavingCountdown(true);
+    setStorageMessage("");
+
+    try {
+      const normalizedSeconds = await setRecordingCountdownSecondsPreference(userKey, seconds);
+      setRecordingCountdownSeconds(normalizedSeconds);
+      setStorageMessageTone("success");
+      setStorageMessage(
+        normalizedSeconds > 0
+          ? `Recording countdown set to ${normalizedSeconds} seconds.`
+          : "Recording countdown is turned off."
+      );
+    } catch (error) {
+      setRecordingCountdownSeconds(previousSeconds);
+      Alert.alert("Setting not saved", String(error.message || error));
+    } finally {
+      setSavingCountdown(false);
+    }
+  }
+
+  async function handleCountdownSoundToggle(enabled) {
+    const previousValue = recordingCountdownSound;
+    setRecordingCountdownSound(enabled);
+    setSavingCountdownSound(true);
+    setStorageMessage("");
+
+    try {
+      await setRecordingCountdownSoundPreference(userKey, enabled);
+      setStorageMessageTone("success");
+      setStorageMessage(enabled ? "Countdown sound is enabled." : "Countdown sound is muted.");
+    } catch (error) {
+      setRecordingCountdownSound(previousValue);
+      Alert.alert("Setting not saved", String(error.message || error));
+    } finally {
+      setSavingCountdownSound(false);
     }
   }
 
@@ -258,6 +316,55 @@ export default function SettingsScreen({ navigation }) {
               </TouchableOpacity>
             );
           })}
+        </View>
+      </View>
+
+      <View style={commonStyles.card}>
+        <Text style={commonStyles.label}>Recording Countdown</Text>
+        <Text style={[commonStyles.sectionTitle, { marginTop: 10 }]}>Start Delay</Text>
+        <Text style={commonStyles.subtitle}>
+          Give the player time to get into position before the recording and scoring clip starts.
+        </Text>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
+          {RECORDING_COUNTDOWN_OPTIONS.map((seconds) => {
+            const active = Number(recordingCountdownSeconds) === Number(seconds);
+            return (
+              <TouchableOpacity
+                key={seconds}
+                activeOpacity={0.9}
+                onPress={() => handleCountdownChange(seconds)}
+                disabled={savingCountdown}
+                style={{
+                  minWidth: 68,
+                  borderRadius: 999,
+                  borderWidth: 1,
+                  borderColor: active ? colors.primary : colors.border,
+                  backgroundColor: active ? colors.primary : colors.backgroundSoft,
+                  paddingHorizontal: 14,
+                  paddingVertical: 11,
+                  alignItems: "center",
+                  opacity: savingCountdown ? 0.65 : 1,
+                }}
+              >
+                <Text style={{ color: active ? "#091220" : colors.text, fontSize: 13, fontWeight: "900" }}>
+                  {seconds === 0 ? "Off" : `${seconds}s`}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        <View style={{ marginTop: 18, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 14 }}>
+          <View style={{ flex: 1 }}>
+            <Text style={[commonStyles.sectionTitle, { fontSize: 16 }]}>Countdown Sound</Text>
+            <Text style={commonStyles.subtitle}>Play a short cue on each countdown number.</Text>
+          </View>
+          <Switch
+            value={recordingCountdownSound}
+            onValueChange={handleCountdownSoundToggle}
+            thumbColor="#ffffff"
+            trackColor={{ false: colors.border, true: colors.primary }}
+            disabled={savingCountdownSound}
+          />
         </View>
       </View>
 

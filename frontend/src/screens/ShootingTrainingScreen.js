@@ -1,9 +1,13 @@
 import { useEvent } from "expo";
+import { Feather } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/native";
+import { useAudioPlayer } from "expo-audio";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
+import * as ScreenOrientation from "expo-screen-orientation";
 import { VideoView, useVideoPlayer } from "expo-video";
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Linking, ScrollView, Switch, Text, TouchableOpacity, View } from "react-native";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Linking, ScrollView, Switch, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -14,21 +18,37 @@ import {
 } from "../services/api";
 import { Haptics, hapticImpact, hapticSelection, hapticSuccess, hapticWarning } from "../services/haptics";
 import { archiveCompletedSession } from "../services/sessionArchive";
+import {
+  getRecordingCountdownSecondsPreference,
+  getRecordingCountdownSoundPreference,
+} from "../services/storage";
 import { commonStyles } from "../theme/styles";
 import { colors } from "../theme/colors";
+import { COUNTDOWN_BEEP_SOURCE, COUNTDOWN_START_BUZZER_SOURCE, wait } from "../utils/countdown";
 import { buildUserKey } from "../utils/userKey";
 
 const OVERLAY_OPTIONS = [
   {
     id: "full_tracking",
-    title: "Full Tracking",
-    description: "Show all tracked basketball, hoop, and shooter detections in the output video.",
+    title: "Full Overlay",
+    description: "Show tracking details, detection boxes, shot stats, and result banners.",
+  },
+  {
+    id: "focus_stats",
+    title: "Focus",
+    description: "Show shot stats and make banners without detection boxes.",
   },
   {
     id: "stats_only",
-    title: "Stats Only",
-    description: "Only show attempts, makes, misses, and accuracy in the final video.",
+    title: "Score",
+    description: "Only show attempts, makes, misses, and accuracy.",
   },
+];
+
+const SOURCE_ORIENTATION_OPTIONS = [
+  { id: "auto", title: "Auto" },
+  { id: "portrait", title: "Portrait" },
+  { id: "landscape", title: "Landscape" },
 ];
 
 const INITIAL_STATS = {
@@ -38,11 +58,13 @@ const INITIAL_STATS = {
   accuracy: 0,
 };
 
-export default function ShootingTrainingScreen() {
+export default function ShootingTrainingScreen({ navigation }) {
   const { playerEmail, playerName, userId } = useAuth();
+  const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
+  const landscapeViewport = viewportWidth > viewportHeight;
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [videoSource, setVideoSource] = useState("upload");
-  const [overlayMode, setOverlayMode] = useState("stats_only");
+  const [overlayMode, setOverlayMode] = useState("focus_stats");
   const [testMode, setTestMode] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState("idle");
@@ -56,15 +78,66 @@ export default function ShootingTrainingScreen() {
   const [archiveMessageTone, setArchiveMessageTone] = useState("neutral");
   const [starting, setStarting] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraViewKey, setCameraViewKey] = useState(0);
+  const [cameraFacing, setCameraFacing] = useState("back");
   const [recording, setRecording] = useState(false);
+  const [countdownValue, setCountdownValue] = useState(null);
+  const [recordingCountdownSeconds, setRecordingCountdownSeconds] = useState(3);
+  const [recordingCountdownSound, setRecordingCountdownSound] = useState(true);
+  const [sourceOrientation, setSourceOrientation] = useState("auto");
+  const [outputDimensions, setOutputDimensions] = useState({ width: 0, height: 0 });
   const [recordingStatus, setRecordingStatus] = useState("Ready to record a new clip.");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
+  const countdownCancelRef = useRef(false);
   const uploadAbortRef = useRef(null);
+  const countdownPlayer = useAudioPlayer(COUNTDOWN_BEEP_SOURCE);
+  const countdownStartPlayer = useAudioPlayer(COUNTDOWN_START_BUZZER_SOURCE);
   const userKey = useMemo(
     () => buildUserKey({ userId, playerName, playerEmail }),
     [playerEmail, playerName, userId]
   );
+
+  const refreshCountdownPreferences = useCallback(async () => {
+    const [seconds, soundEnabled] = await Promise.all([
+      getRecordingCountdownSecondsPreference(userKey),
+      getRecordingCountdownSoundPreference(userKey),
+    ]);
+    setRecordingCountdownSeconds(seconds);
+    setRecordingCountdownSound(soundEnabled);
+  }, [userKey]);
+
+  useEffect(() => {
+    let mounted = true;
+    refreshCountdownPreferences()
+      .then(() => {
+        if (!mounted) {
+          return;
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [refreshCountdownPreferences]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshCountdownPreferences().catch(() => {});
+    }, [refreshCountdownPreferences])
+  );
+
+  useEffect(() => {
+    if (cameraOpen) {
+      ScreenOrientation.unlockAsync().catch(() => {});
+      return () => {
+        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+      };
+    }
+
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    return undefined;
+  }, [cameraOpen]);
 
   useEffect(() => {
     if (!jobId || status !== "processing") {
@@ -78,6 +151,7 @@ export default function ShootingTrainingScreen() {
         setStats(result.stats || INITIAL_STATS);
         setSummary(result.summary || "");
         setClassification(result.classification || "");
+        setOutputDimensions({ width: result.output_width || 0, height: result.output_height || 0 });
 
         if (result.status === "completed") {
           const archivedAt = new Date().toISOString();
@@ -139,6 +213,7 @@ export default function ShootingTrainingScreen() {
 
   useEffect(() => {
     return () => {
+      countdownCancelRef.current = true;
       if (cameraRef.current && recording) {
         cameraRef.current.stopRecording();
       }
@@ -175,6 +250,7 @@ export default function ShootingTrainingScreen() {
 
     setVideoSource("upload");
     setSelectedVideo(result.assets[0]);
+    setSourceOrientation("auto");
     setCameraOpen(false);
     resetRunState();
   }
@@ -191,18 +267,82 @@ export default function ShootingTrainingScreen() {
 
     setVideoSource("camera");
     setCameraOpen(true);
+    setCameraViewKey((current) => current + 1);
     setRecordingStatus("Frame the shooter and rim, then start recording.");
     setErrorMessage("");
   }
 
+  function playCountdownCue() {
+    hapticSelection();
+    if (!recordingCountdownSound) {
+      return;
+    }
+    try {
+      countdownPlayer.seekTo(0);
+      countdownPlayer.play();
+    } catch (_error) {
+      // Haptics still provide a fallback cue if audio is unavailable.
+    }
+  }
+
+  function playCountdownStartCue() {
+    hapticImpact(Haptics.ImpactFeedbackStyle.Heavy);
+    if (!recordingCountdownSound) {
+      return;
+    }
+    try {
+      countdownStartPlayer.seekTo(0);
+      countdownStartPlayer.play();
+    } catch (_error) {
+      // Haptics still provide a fallback start cue if audio is unavailable.
+    }
+  }
+
+  function cancelRecordingCountdown() {
+    countdownCancelRef.current = true;
+    setCountdownValue(null);
+    setRecordingStatus("Countdown cancelled. Tap record when you are ready.");
+    hapticWarning();
+  }
+
   async function startRecordingClip() {
-    if (!cameraRef.current || recording) {
+    if (!cameraRef.current || recording || countdownValue !== null) {
       return;
     }
 
     setErrorMessage("");
     hapticImpact(Haptics.ImpactFeedbackStyle.Medium);
+    const countdownSeconds = Number(recordingCountdownSeconds || 0);
+    if (countdownSeconds > 0) {
+      countdownCancelRef.current = false;
+      setRecordingStatus(`Get ready. Recording starts in ${countdownSeconds} seconds.`);
+      for (let remaining = countdownSeconds; remaining > 0; remaining -= 1) {
+        if (countdownCancelRef.current) {
+          return;
+        }
+        setCountdownValue(remaining);
+        playCountdownCue();
+        await wait(1000);
+      }
+      if (countdownCancelRef.current) {
+        return;
+      }
+      setCountdownValue(null);
+    }
+
+    await beginRecordingClip({ playStartCue: countdownSeconds > 0 });
+  }
+
+  async function beginRecordingClip({ playStartCue = false } = {}) {
+    if (!cameraRef.current || recording) {
+      return;
+    }
+
     setRecording(true);
+    if (playStartCue) {
+      playCountdownStartCue();
+    }
+    const recordingSourceOrientation = landscapeViewport ? "landscape" : "portrait";
     setRecordingStatus("Recording in progress...");
 
     try {
@@ -216,6 +356,7 @@ export default function ShootingTrainingScreen() {
           name: `live-shot-training-${Date.now()}.mp4`,
           mimeType: "video/mp4",
         });
+        setSourceOrientation(recordingSourceOrientation);
         setRecordingStatus("Recorded clip ready for analysis.");
         setCameraOpen(false);
         resetRunState();
@@ -243,9 +384,23 @@ export default function ShootingTrainingScreen() {
     if (recording && cameraRef.current) {
       cameraRef.current.stopRecording();
     }
+    countdownCancelRef.current = true;
+    setCountdownValue(null);
     setRecording(false);
     setCameraOpen(false);
     setRecordingStatus("Ready to record a new clip.");
+  }
+
+  function toggleCameraFacing() {
+    if (recording || countdownValue !== null || busyWithAnalysis) {
+      return;
+    }
+    hapticSelection();
+    setCameraFacing((current) => {
+      const nextFacing = current === "back" ? "front" : "back";
+      setRecordingStatus(`${nextFacing === "front" ? "Front" : "Back"} camera ready.`);
+      return nextFacing;
+    });
   }
 
   async function handleStartTraining() {
@@ -261,6 +416,7 @@ export default function ShootingTrainingScreen() {
     setSummary("");
     setClassification("");
     setStats(INITIAL_STATS);
+    setOutputDimensions({ width: 0, height: 0 });
     setProgress(0);
     setUploadProgress(0);
 
@@ -274,6 +430,7 @@ export default function ShootingTrainingScreen() {
         overlayMode,
         testMode,
         userKey,
+        sourceOrientation,
         abortSignal: abortController.signal,
         onUploadProgress: (value) => setUploadProgress(clampPercent(value)),
       });
@@ -330,9 +487,13 @@ export default function ShootingTrainingScreen() {
     setArchiveMessage("");
     setArchiveMessageTone("neutral");
     setUploadProgress(0);
+    setOutputDimensions({ width: 0, height: 0 });
   }
 
   const busyWithAnalysis = status === "processing" || status === "uploading" || starting;
+  const countdownActive = countdownValue !== null;
+  const sourceOrientationLabel =
+    sourceOrientation === "landscape" ? "Landscape" : sourceOrientation === "portrait" ? "Portrait" : "Auto";
 
   return (
     <ScrollView style={commonStyles.screen} contentContainerStyle={commonStyles.screenBottomSpace}>
@@ -367,6 +528,41 @@ export default function ShootingTrainingScreen() {
         <Text style={[commonStyles.subtitle, { fontSize: 12 }]}>
           Tip: side-angle or baseline clips work best when the entire shot path and rim stay in frame.
         </Text>
+        <View style={{ marginTop: 14 }}>
+          <Text style={commonStyles.label}>Clip Orientation</Text>
+          {videoSource === "upload" ? (
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+              {SOURCE_ORIENTATION_OPTIONS.map((option) => {
+                const active = sourceOrientation === option.id;
+                return (
+                  <TouchableOpacity
+                    key={option.id}
+                    activeOpacity={0.9}
+                    onPress={() => {
+                      hapticSelection();
+                      setSourceOrientation(option.id);
+                    }}
+                    disabled={busyWithAnalysis}
+                    style={{
+                      borderRadius: 999,
+                      borderWidth: 1,
+                      borderColor: active ? colors.primary : colors.border,
+                      backgroundColor: active ? colors.primary : colors.backgroundSoft,
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                    }}
+                  >
+                    <Text style={{ color: active ? "#091220" : colors.text, fontSize: 12, fontWeight: "900" }}>
+                      {option.title}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          ) : (
+            <Text style={[commonStyles.subtitle, { marginTop: 8, color: colors.text }]}>{sourceOrientationLabel}</Text>
+          )}
+        </View>
       </View>
 
       {cameraOpen ? (
@@ -377,11 +573,12 @@ export default function ShootingTrainingScreen() {
             <View style={{ marginTop: 14, overflow: "hidden", borderRadius: 18, borderWidth: 1, borderColor: colors.border }}>
               <View style={{ height: 300, backgroundColor: "#040b15" }}>
                 <CameraView
+                  key={`shot-camera-${cameraViewKey}`}
                   ref={cameraRef}
                   style={{ flex: 1 }}
                   mode="video"
                   mute
-                  facing="back"
+                  facing={cameraFacing}
                   videoQuality="720p"
                 />
                 <View
@@ -408,20 +605,102 @@ export default function ShootingTrainingScreen() {
                 >
                   RECORDING FRAME
                 </Text>
+                {countdownActive ? (
+                  <View
+                    pointerEvents="none"
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: "rgba(4, 11, 21, 0.24)",
+                    }}
+                  >
+                    <Text style={{ color: colors.text, fontSize: 72, fontWeight: "900" }}>{countdownValue}</Text>
+                    <Text style={{ color: colors.primary, fontSize: 13, fontWeight: "900", textTransform: "uppercase" }}>
+                      Get ready
+                    </Text>
+                  </View>
+                ) : null}
               </View>
             </View>
           ) : (
             <PrimaryButton title="Allow Camera" onPress={requestCameraPermission} />
           )}
 
-          <View style={{ alignItems: "center", marginTop: 14 }}>
-            <View style={{ width: "72%", maxWidth: 280 }}>
-              <PrimaryButton
-                title={recording ? "Recording..." : "Start Recording"}
-                onPress={startRecordingClip}
-                loading={false}
-                disabled={!cameraPermission?.granted || recording || busyWithAnalysis}
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 14, marginTop: 14 }}>
+            <View style={{ width: 56, alignItems: "center" }}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                accessibilityLabel="Open session history"
+                onPress={() => {
+                  hapticSelection();
+                  navigation.navigate("SessionHistory");
+                }}
+                disabled={busyWithAnalysis || recording || countdownActive}
+                style={{
+                  width: 48,
+                  height: 48,
+                  borderRadius: 24,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  backgroundColor: colors.backgroundSoft,
+                  opacity: busyWithAnalysis || recording || countdownActive ? 0.45 : 1,
+                }}
+              >
+                <Feather name="clock" size={19} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              activeOpacity={0.86}
+              onPress={countdownActive ? cancelRecordingCountdown : recording ? stopRecordingClip : startRecordingClip}
+              disabled={!cameraPermission?.granted || busyWithAnalysis || recordingStatus === "Finishing clip..."}
+              style={{
+                width: 76,
+                height: 76,
+                borderRadius: 38,
+                alignItems: "center",
+                justifyContent: "center",
+                borderWidth: 5,
+                borderColor: recording ? colors.danger : colors.text,
+                backgroundColor: "rgba(247, 251, 255, 0.12)",
+                opacity: !cameraPermission?.granted || busyWithAnalysis || recordingStatus === "Finishing clip..." ? 0.45 : 1,
+              }}
+            >
+              <View
+                style={{
+                  width: recording ? 30 : 56,
+                  height: recording ? 30 : 56,
+                  borderRadius: recording ? 8 : 28,
+                  backgroundColor: colors.danger,
+                }}
               />
+            </TouchableOpacity>
+            <View style={{ width: 56, alignItems: "center" }}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                accessibilityLabel={`Switch camera. Current camera: ${cameraFacing === "front" ? "Front" : "Back"}`}
+                onPress={toggleCameraFacing}
+                disabled={busyWithAnalysis || recording || countdownActive}
+                style={{
+                  width: 48,
+                  height: 48,
+                  borderRadius: 24,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  backgroundColor: colors.backgroundSoft,
+                  opacity: busyWithAnalysis || recording || countdownActive ? 0.45 : 1,
+                }}
+              >
+                <Feather name="rotate-cw" size={19} color={colors.text} />
+              </TouchableOpacity>
             </View>
           </View>
           <View style={{ marginTop: 10 }}>
@@ -573,7 +852,11 @@ export default function ShootingTrainingScreen() {
                 backgroundColor: "#040b15",
               }}
             >
-              <ResultVideoPlayer videoUrl={resultVideoUrl} />
+              <ResultVideoPlayer
+                videoUrl={resultVideoUrl}
+                outputWidth={outputDimensions.width}
+                outputHeight={outputDimensions.height}
+              />
             </View>
             <Text style={[commonStyles.subtitle, { marginTop: 10, fontSize: 12 }]}>
               Review the annotated output here, then download the file if you want to save or share it.
@@ -617,7 +900,7 @@ function clampPercent(value) {
   return Math.max(0, Math.min(Math.round(numericValue), 100));
 }
 
-function ResultVideoPlayer({ videoUrl }) {
+function ResultVideoPlayer({ videoUrl, outputWidth = 0, outputHeight = 0 }) {
   const player = useVideoPlayer(
     {
       uri: videoUrl,
@@ -629,11 +912,13 @@ function ResultVideoPlayer({ videoUrl }) {
     }
   );
   const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
+  const outputIsLandscape = Number(outputWidth || 0) > Number(outputHeight || 0);
+  const videoHeight = outputIsLandscape ? 220 : 320;
 
   return (
     <View>
       <VideoView
-        style={{ width: "100%", height: 320, backgroundColor: "#040b15" }}
+        style={{ width: "100%", height: videoHeight, backgroundColor: "#040b15" }}
         player={player}
         nativeControls
         allowsFullscreen

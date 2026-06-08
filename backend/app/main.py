@@ -70,6 +70,15 @@ app.add_middleware(
 ensure_data_dir()
 ensure_shot_training_dirs()
 ensure_coaching_video_dirs()
+
+SOURCE_ORIENTATION_VALUES = {"auto", "portrait", "landscape"}
+
+
+def validate_source_orientation(value: str) -> str:
+    normalized = str(value or "auto").strip().lower()
+    if normalized not in SOURCE_ORIENTATION_VALUES:
+        raise HTTPException(status_code=400, detail="Invalid source orientation.")
+    return normalized
 pose_estimator = PoseEstimator()
 ball_detector = BallDetector()
 
@@ -132,6 +141,7 @@ async def start_shooting_training(
     overlay_mode: str = Form("focus_stats"),
     test_mode: bool = Form(False),
     user_key: str = Form(...),
+    source_orientation: str = Form("auto"),
 ) -> ShotTrainingStartResponse:
     if not ball_detector.ready:
         raise HTTPException(status_code=503, detail="Ball detector model is not ready.")
@@ -144,6 +154,7 @@ async def start_shooting_training(
         raise HTTPException(status_code=400, detail="Please upload a video file.")
     if overlay_mode not in {"full_tracking", "focus_stats", "stats_only"}:
         raise HTTPException(status_code=400, detail="Invalid shot training overlay mode.")
+    source_orientation = validate_source_orientation(source_orientation)
 
     job = start_shot_training_job(
         detector=ball_detector,
@@ -151,12 +162,14 @@ async def start_shooting_training(
         overlay_mode=overlay_mode,
         test_mode=test_mode,
         user_key=user_key,
+        source_orientation=source_orientation,
     )
     return ShotTrainingStartResponse(
         file_id=str(job["file_id"]),
         status=str(job["status"]),
         overlay_mode=str(job["overlay_mode"]),
         test_mode=bool(job["test_mode"]),
+        source_orientation=str(job["source_orientation"]),
     )
 
 
@@ -167,6 +180,7 @@ async def start_coaching_video(
     overlay_mode: str = Form("focus_feedback"),
     test_mode: bool = Form(False),
     user_key: str = Form(...),
+    source_orientation: str = Form("auto"),
 ) -> CoachingVideoStartResponse:
     if mode not in {item.id for item in MODE_LIBRARY}:
         raise HTTPException(status_code=400, detail="Invalid coaching mode.")
@@ -176,6 +190,7 @@ async def start_coaching_video(
         raise HTTPException(status_code=400, detail="Please upload a video file.")
     if overlay_mode not in {"full_overlay", "focus_feedback", "score_only"}:
         raise HTTPException(status_code=400, detail="Invalid coaching video overlay mode.")
+    source_orientation = validate_source_orientation(source_orientation)
 
     job = start_coaching_video_job(
         mode=mode,
@@ -185,6 +200,7 @@ async def start_coaching_video(
         overlay_mode=overlay_mode,
         test_mode=test_mode,
         user_key=user_key,
+        source_orientation=source_orientation,
     )
     return CoachingVideoStartResponse(
         file_id=str(job["file_id"]),
@@ -192,6 +208,7 @@ async def start_coaching_video(
         status=str(job["status"]),
         overlay_mode=str(job["overlay_mode"]),
         test_mode=bool(job["test_mode"]),
+        source_orientation=str(job["source_orientation"]),
     )
 
 

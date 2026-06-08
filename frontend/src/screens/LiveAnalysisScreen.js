@@ -22,17 +22,17 @@ const OVERLAY_OPTIONS = [
   {
     id: "full_overlay",
     title: "Full Overlay",
-    description: "Show pose landmarks, ball tracking, score, and feedback on the analyzed video.",
+    description: "Show tracking details, detection boxes, coaching cues, score, and counts.",
   },
   {
     id: "focus_feedback",
-    title: "Focus Feedback",
-    description: "Prioritize coaching cues and score panels with a cleaner training-video presentation.",
+    title: "Focus",
+    description: "Show the main coaching cue, score, tracking status, and counts without detection boxes.",
   },
   {
     id: "score_only",
-    title: "Score Only",
-    description: "Keep the output clean with the scoreboard and footer only.",
+    title: "Score",
+    description: "Show only the score/classification and drill count results.",
   },
 ];
 
