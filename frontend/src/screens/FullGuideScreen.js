@@ -1,6 +1,5 @@
 import React, { useLayoutEffect, useState } from "react";
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import MotionGuideCard from "../components/MotionGuideCard";
+import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { getModeGuide } from "../data/modeGuides";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
@@ -39,11 +38,11 @@ export default function FullGuideScreen({ route, navigation }) {
 
       <View style={styles.poseCard}>
         <Text style={styles.poseEyebrow}>Ideal Form</Text>
-        <MotionGuideCard
-          source={guide.image}
+        <Image
+          source={guide.motionGif || guide.image}
           accessibilityLabel={guide.imageAlt}
-          phases={guide.motionGuide?.phases}
-          height={420}
+          style={styles.poseMotionImage}
+          resizeMode="contain"
         />
         <Text style={styles.poseHeadline}>{guide.poseHeadline}</Text>
       </View>
@@ -102,6 +101,15 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "900",
     textTransform: "uppercase",
+  },
+  poseMotionImage: {
+    width: "100%",
+    height: 420,
+    marginTop: 12,
+    borderRadius: 18,
+    backgroundColor: colors.backgroundSoft,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   poseHeadline: {
     marginTop: 14,

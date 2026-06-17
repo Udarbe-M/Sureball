@@ -9,7 +9,6 @@ import { VideoView, useVideoPlayer } from "expo-video";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Image, Linking, PanResponder, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import BrandMark from "../components/BrandMark";
-import MotionGuideCard from "../components/MotionGuideCard";
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
 import { getModeGuide } from "../data/modeGuides";
@@ -23,8 +22,10 @@ import {
 import { Haptics, hapticImpact, hapticSelection, hapticSuccess, hapticWarning } from "../services/haptics";
 import { archiveCompletedSession } from "../services/sessionArchive";
 import {
+  getAppGuideSeenPreference,
   getRecordingCountdownSecondsPreference,
   getRecordingCountdownSoundPreference,
+  setAppGuideSeenPreference,
 } from "../services/storage";
 import { colors } from "../theme/colors";
 import { COUNTDOWN_BEEP_SOURCE, COUNTDOWN_START_BUZZER_SOURCE, wait } from "../utils/countdown";
@@ -89,6 +90,67 @@ const SOURCE_ORIENTATION_OPTIONS = [
   { id: "auto", title: "Auto" },
   { id: "portrait", title: "Portrait" },
   { id: "landscape", title: "Landscape" },
+];
+
+const APP_GUIDE_STEPS = [
+  {
+    id: "menu",
+    target: "menuButton",
+    title: "Training Menu",
+    body: "Open quick controls, Settings, this Guide, camera power, and the full drill guides.",
+  },
+  {
+    id: "modeBadge",
+    target: "modeBadge",
+    title: "Current Drill",
+    body: "This shows the active drill and output style before you record or upload a clip.",
+  },
+  {
+    id: "record",
+    target: "recordButton",
+    title: "Record",
+    body: "Tap here to start the countdown and record your drill. Tap again to stop recording.",
+  },
+  {
+    id: "history",
+    target: "historyButton",
+    title: "Session History",
+    body: "Open your archived sessions and replay saved annotated videos.",
+  },
+  {
+    id: "cameraSwitch",
+    target: "cameraSwitchButton",
+    title: "Camera Switch",
+    body: "Change between the back and front camera before recording.",
+  },
+  {
+    id: "sheetHandle",
+    target: "sheetHandle",
+    title: "Training Card",
+    body: "Drag this card up or down to show or hide mode, output, upload, and analysis controls.",
+  },
+  {
+    id: "modePicker",
+    target: "modePicker",
+    title: "Mode Picker",
+    body: "Choose Shooting, Dribbling, or Passing before analyzing the clip.",
+    requiresSheet: true,
+  },
+  {
+    id: "outputPicker",
+    target: "outputPicker",
+    title: "Output Style",
+    body: "Use Focus for coaching, Full Overlay for tracking details, or Score for a simple result.",
+    requiresSheet: true,
+  },
+  {
+    id: "clipActions",
+    target: "clipActions",
+    title: "Upload and Analyze",
+    body: "Use Upload Clip for saved videos, then Analyze when the clip is ready.",
+    requiresSheet: true,
+    scrollTarget: "clipActions",
+  },
 ];
 
 const INITIAL_COACHING_RESULTS = {
@@ -531,13 +593,36 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const sheetContentScrollRef = useRef(null);
   const sheetDragStartHeightRef = useRef(collapsedCameraHeight);
   const cameraStageHeightRef = useRef(collapsedCameraHeight);
+  const appGuideRootRef = useRef(null);
+  const appGuideAutoCheckedUserRef = useRef(null);
+  const appGuideTargetRefs = useRef({});
+  const appGuideContentLayoutsRef = useRef({});
   const [cameraStageHeight, setCameraStageHeight] = useState(collapsedCameraHeight);
+  const [appGuideVisible, setAppGuideVisible] = useState(false);
+  const [appGuideStepIndex, setAppGuideStepIndex] = useState(0);
+  const [appGuideTargetLayout, setAppGuideTargetLayout] = useState(null);
   const countdownPlayer = useAudioPlayer(COUNTDOWN_BEEP_SOURCE);
   const countdownStartPlayer = useAudioPlayer(COUNTDOWN_START_BUZZER_SOURCE);
 
   const userKey = useMemo(
     () => buildUserKey({ userId, playerName, playerEmail }),
     [playerEmail, playerName, userId]
+  );
+
+  const setAppGuideTargetRef = useCallback(
+    (targetKey) => (node) => {
+      if (node) {
+        appGuideTargetRefs.current[targetKey] = node;
+      }
+    },
+    []
+  );
+
+  const setAppGuideContentLayout = useCallback(
+    (targetKey) => (event) => {
+      appGuideContentLayoutsRef.current[targetKey] = event.nativeEvent.layout;
+    },
+    []
   );
 
   const refreshCountdownPreferences = useCallback(async () => {
@@ -1222,9 +1307,107 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const bottomModeTrayOpen = cameraStageHeight < collapsedCameraHeight - 40;
   const trainingMenuBottomOffset = bottomModeTrayOpen ? 104 : 118;
   const trainingMenuMaxHeight = Math.max(88, cameraStageHeight - trainingMenuBottomOffset - 96);
+  const appGuideStep = APP_GUIDE_STEPS[appGuideStepIndex] || APP_GUIDE_STEPS[0];
+  const appGuideCanShow = !recording && !countdownActive && !busyWithAnalysis;
+
+  const measureAppGuideTarget = useCallback(() => {
+    const targetNode = appGuideTargetRefs.current[appGuideStep?.target];
+    const rootNode = appGuideRootRef.current;
+    if (!targetNode?.measureInWindow || !rootNode?.measureInWindow) {
+      setAppGuideTargetLayout({ x: 16, y: Math.max(80, viewportHeight - 260), width: viewportWidth - 32, height: 120 });
+      return;
+    }
+
+    rootNode.measureInWindow((rootX, rootY) => {
+      targetNode.measureInWindow((windowX, windowY, width, height) => {
+        if (!width || !height) {
+          setAppGuideTargetLayout({ x: 16, y: Math.max(80, viewportHeight - 260), width: viewportWidth - 32, height: 120 });
+          return;
+        }
+
+        const localX = windowX - rootX;
+        const localY = windowY - rootY;
+        const safeX = clampValue(localX, 8, Math.max(8, viewportWidth - 80));
+        const safeY = clampValue(localY, 8, Math.max(8, viewportHeight - 80));
+        const safeWidth = Math.max(44, Math.min(width, viewportWidth - safeX - 8));
+        const safeHeight = Math.max(36, Math.min(height, viewportHeight - safeY - 8));
+        setAppGuideTargetLayout({ x: safeX, y: safeY, width: safeWidth, height: safeHeight });
+      });
+    });
+  }, [appGuideStep?.target, viewportHeight, viewportWidth]);
+
+  const completeAppGuide = useCallback(
+    async (markSeen = true) => {
+      setAppGuideVisible(false);
+      setMenuOpen(false);
+      setAppGuideTargetLayout(null);
+      if (markSeen) {
+        await setAppGuideSeenPreference(userKey, true);
+      }
+    },
+    [userKey]
+  );
+
+  const startAppGuide = useCallback(() => {
+    if (!appGuideCanShow) {
+      return;
+    }
+    setMenuOpen(false);
+    setAppGuideStepIndex(0);
+    setAppGuideVisible(true);
+    setAppGuideTargetLayout(null);
+  }, [appGuideCanShow]);
+
+  useEffect(() => {
+    if (!appGuideVisible) {
+      return undefined;
+    }
+
+    const requiresSheet = Boolean(appGuideStep?.requiresSheet);
+    if (requiresSheet && !bottomModeTrayOpen) {
+      setBottomModeTrayOpen(true);
+    } else if (!requiresSheet && bottomModeTrayOpen) {
+      setBottomModeTrayOpen(false);
+    }
+    if (menuOpen) {
+      setMenuOpen(false);
+    }
+    if (requiresSheet) {
+      const scrollTargetLayout = appGuideStep?.scrollTarget
+        ? appGuideContentLayoutsRef.current[appGuideStep.scrollTarget]
+        : null;
+      sheetContentScrollRef.current?.scrollTo({
+        y: Math.max(0, (scrollTargetLayout?.y || 0) - 18),
+        animated: true,
+      });
+    }
+
+    const timer = setTimeout(measureAppGuideTarget, appGuideStep?.scrollTarget ? 720 : requiresSheet ? 480 : 220);
+    return () => clearTimeout(timer);
+  }, [appGuideStep, appGuideStepIndex, appGuideVisible, bottomModeTrayOpen, measureAppGuideTarget, menuOpen]);
+
+  useEffect(() => {
+    if (!userKey || appGuideAutoCheckedUserRef.current === userKey || !appGuideCanShow) {
+      return undefined;
+    }
+
+    let alive = true;
+    appGuideAutoCheckedUserRef.current = userKey;
+    getAppGuideSeenPreference(userKey)
+      .then((seen) => {
+        if (alive && !seen) {
+          startAppGuide();
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      alive = false;
+    };
+  }, [appGuideCanShow, startAppGuide, userKey]);
 
   return (
-    <View style={cameraStyles.screen}>
+    <View ref={appGuideRootRef} collapsable={false} style={cameraStyles.screen}>
       <View style={[cameraStyles.cameraStage, { height: cameraStageHeight }]} {...modeSwipeResponder.panHandlers}>
         {cameraPowered ? (
           <>
@@ -1272,7 +1455,13 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         )}
 
         <View style={cameraStyles.topBar}>
-          <TouchableOpacity activeOpacity={0.9} onPress={() => setMenuOpen((current) => !current)} style={cameraStyles.iconButton}>
+          <TouchableOpacity
+            ref={setAppGuideTargetRef("menuButton")}
+            collapsable={false}
+            activeOpacity={0.9}
+            onPress={() => setMenuOpen((current) => !current)}
+            style={cameraStyles.iconButton}
+          >
             <Feather name={menuOpen ? "x" : "menu"} size={23} color={colors.text} />
           </TouchableOpacity>
           <View style={cameraStyles.brandPill}>
@@ -1284,7 +1473,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           </TouchableOpacity>
         </View>
 
-        <View style={cameraStyles.modeBadge}>
+        <View ref={setAppGuideTargetRef("modeBadge")} collapsable={false} style={cameraStyles.modeBadge}>
           <Text style={cameraStyles.modeBadgeText}>{activeMode.title}</Text>
           <Text style={cameraStyles.modeBadgeMeta}>{selectedOverlay?.title}</Text>
         </View>
@@ -1349,12 +1538,13 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
                   onPress={() => {
                     hapticSelection();
                     setMenuOpen(false);
-                    navigation.navigate("SessionHistory");
+                    startAppGuide();
                   }}
-                  style={cameraStyles.menuToolButton}
+                  disabled={!appGuideCanShow}
+                  style={[cameraStyles.menuToolButton, !appGuideCanShow && cameraStyles.disabledControl]}
                 >
-                  <Feather name="clock" size={16} color={colors.text} />
-                  <Text style={cameraStyles.menuToolText}>History</Text>
+                  <Feather name="help-circle" size={16} color={colors.text} />
+                  <Text style={cameraStyles.menuToolText}>Guide</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   activeOpacity={0.9}
@@ -1420,6 +1610,8 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         <View style={cameraStyles.captureTray}>
           <View style={cameraStyles.captureSideSlot}>
             <TouchableOpacity
+              ref={setAppGuideTargetRef("historyButton")}
+              collapsable={false}
               activeOpacity={0.85}
               accessibilityLabel="Open session history"
               onPress={() => {
@@ -1433,6 +1625,8 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
             </TouchableOpacity>
           </View>
           <TouchableOpacity
+            ref={setAppGuideTargetRef("recordButton")}
+            collapsable={false}
             activeOpacity={0.85}
             onPress={recordButtonAction}
             disabled={recordButtonDisabled}
@@ -1446,6 +1640,8 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           </TouchableOpacity>
           <View style={cameraStyles.captureSideSlot}>
             <TouchableOpacity
+              ref={setAppGuideTargetRef("cameraSwitchButton")}
+              collapsable={false}
               activeOpacity={0.85}
               accessibilityLabel={`Switch camera. Current camera: ${cameraFacingLabel}`}
               onPress={toggleCameraFacing}
@@ -1459,6 +1655,8 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
       </View>
 
       <View
+        ref={setAppGuideTargetRef("sheetBody")}
+        collapsable={false}
         style={[
           cameraStyles.sessionSheet,
           !bottomModeTrayOpen && cameraStyles.sessionSheetCollapsed,
@@ -1466,6 +1664,8 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
         ]}
       >
         <View
+          ref={setAppGuideTargetRef("sheetHandle")}
+          collapsable={false}
           style={[cameraStyles.sheetDragHeader, !bottomModeTrayOpen && cameraStyles.sheetDragHeaderCollapsed]}
           {...sheetDragResponder.panHandlers}
         >
@@ -1493,7 +1693,12 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
             showsVerticalScrollIndicator
             bounces
           >
-            <View style={cameraStyles.bottomModeGrid}>
+            <View
+              ref={setAppGuideTargetRef("modePicker")}
+              collapsable={false}
+              onLayout={setAppGuideContentLayout("modePicker")}
+              style={cameraStyles.bottomModeGrid}
+            >
                 {MODES.map((mode) => {
                   const active = selectedModeId === mode.id;
                   return (
@@ -1513,7 +1718,12 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
                 })}
               </View>
               <Text style={cameraStyles.bottomTrayLabel}>Output</Text>
-              <View style={cameraStyles.bottomOutputRow}>
+              <View
+                ref={setAppGuideTargetRef("outputPicker")}
+                collapsable={false}
+                onLayout={setAppGuideContentLayout("outputPicker")}
+                style={cameraStyles.bottomOutputRow}
+              >
                 {COACHING_OVERLAY_OPTIONS.map((option) => (
                   <TouchableOpacity
                     key={option.id}
@@ -1596,7 +1806,12 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
             </View>
           </View>
 
-        <View style={cameraStyles.sheetActionRow}>
+        <View
+          ref={setAppGuideTargetRef("clipActions")}
+          collapsable={false}
+          onLayout={setAppGuideContentLayout("clipActions")}
+          style={cameraStyles.sheetActionRow}
+        >
           <TouchableOpacity
             activeOpacity={0.9}
             onPress={pickVideo}
@@ -1759,6 +1974,86 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           </ScrollView>
         ) : null}
       </View>
+
+      {appGuideVisible && appGuideStep ? (
+        <AppGuideOverlay
+          step={appGuideStep}
+          stepIndex={appGuideStepIndex}
+          totalSteps={APP_GUIDE_STEPS.length}
+          targetLayout={appGuideTargetLayout}
+          viewportWidth={viewportWidth}
+          viewportHeight={viewportHeight}
+          onBack={() => setAppGuideStepIndex((current) => Math.max(0, current - 1))}
+          onNext={() => {
+            if (appGuideStepIndex >= APP_GUIDE_STEPS.length - 1) {
+              void completeAppGuide(true);
+              return;
+            }
+            setAppGuideStepIndex((current) => Math.min(APP_GUIDE_STEPS.length - 1, current + 1));
+          }}
+          onSkip={() => void completeAppGuide(true)}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+function AppGuideOverlay({
+  step,
+  stepIndex,
+  totalSteps,
+  targetLayout,
+  viewportWidth,
+  viewportHeight,
+  onBack,
+  onNext,
+  onSkip,
+}) {
+  const highlight = targetLayout
+    ? {
+        left: Math.max(10, targetLayout.x - 8),
+        top: Math.max(10, targetLayout.y - 8),
+        width: Math.min(viewportWidth - 20, targetLayout.width + 16),
+        height: Math.min(viewportHeight - Math.max(10, targetLayout.y - 8) - 10, targetLayout.height + 16),
+      }
+    : null;
+  const panelWidth = Math.min(viewportWidth - 32, 360);
+  const estimatedPanelHeight = 178;
+  const panelTop =
+    highlight && highlight.top > viewportHeight * 0.45
+      ? 44
+      : Math.max(44, viewportHeight - estimatedPanelHeight - 22);
+  const isLast = stepIndex >= totalSteps - 1;
+
+  return (
+    <View style={cameraStyles.appGuideOverlay} pointerEvents="box-none">
+      <View style={cameraStyles.appGuideScrim} pointerEvents="none" />
+      {highlight ? <View pointerEvents="none" style={[cameraStyles.appGuideHighlight, highlight]} /> : null}
+      <View style={[cameraStyles.appGuidePanel, { top: panelTop, width: panelWidth }]}>
+        <Text style={cameraStyles.appGuideStepText}>
+          Step {stepIndex + 1} of {totalSteps}
+        </Text>
+        <Text style={cameraStyles.appGuideTitle}>{step.title}</Text>
+        <Text style={cameraStyles.appGuideBody}>{step.body}</Text>
+        <View style={cameraStyles.appGuideActionRow}>
+          <TouchableOpacity activeOpacity={0.85} onPress={onSkip} style={cameraStyles.appGuideSecondaryButton}>
+            <Text style={cameraStyles.appGuideSecondaryText}>Skip</Text>
+          </TouchableOpacity>
+          <View style={cameraStyles.appGuideNavButtons}>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={onBack}
+              disabled={stepIndex === 0}
+              style={[cameraStyles.appGuideSmallButton, stepIndex === 0 && cameraStyles.disabledControl]}
+            >
+              <Text style={cameraStyles.appGuideSmallButtonText}>Back</Text>
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.9} onPress={onNext} style={cameraStyles.appGuidePrimaryButton}>
+              <Text style={cameraStyles.appGuidePrimaryText}>{isLast ? "Done" : "Next"}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
     </View>
   );
 }
@@ -1779,14 +2074,12 @@ function SetupGuidePanel({ guide }) {
       <View style={cameraStyles.poseReferenceCard}>
         <Text style={cameraStyles.poseReferenceTitle}>{guide.poseCardTitle}</Text>
         <Text style={cameraStyles.poseReferenceHeadline}>{guide.poseHeadline}</Text>
-        <View style={cameraStyles.poseReferenceImage}>
-          <MotionGuideCard
-            source={guide.image}
-            accessibilityLabel={guide.imageAlt}
-            phases={guide.motionGuide?.phases}
-            height={190}
-          />
-        </View>
+        <Image
+          source={guide.motionGif || guide.image}
+          accessibilityLabel={guide.imageAlt}
+          style={cameraStyles.poseReferenceImage}
+          resizeMode="contain"
+        />
         {guide.poseCues.map((cue) => (
           <View key={cue} style={cameraStyles.poseCueRow}>
             <View style={cameraStyles.poseCueDot} />
@@ -2444,6 +2737,99 @@ const cameraStyles = StyleSheet.create({
   disabledControl: {
     opacity: 0.45,
   },
+  appGuideOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 50,
+    elevation: 50,
+  },
+  appGuideScrim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(3, 10, 22, 0.72)",
+  },
+  appGuideHighlight: {
+    position: "absolute",
+    borderRadius: 24,
+    borderWidth: 2,
+    borderColor: colors.primary,
+    backgroundColor: "rgba(255, 122, 26, 0.10)",
+    boxShadow: "0 0 24px rgba(255, 122, 26, 0.55)",
+  },
+  appGuidePanel: {
+    position: "absolute",
+    left: 16,
+    right: 16,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.cardElevated,
+    padding: 16,
+  },
+  appGuideStepText: {
+    color: colors.primary,
+    fontSize: 11,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  appGuideTitle: {
+    marginTop: 5,
+    color: colors.text,
+    fontSize: 20,
+    fontWeight: "900",
+  },
+  appGuideBody: {
+    marginTop: 8,
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: "700",
+  },
+  appGuideActionRow: {
+    marginTop: 15,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  appGuideSecondaryButton: {
+    minHeight: 40,
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+  appGuideSecondaryText: {
+    color: colors.muted,
+    fontWeight: "900",
+  },
+  appGuideNavButtons: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  appGuideSmallButton: {
+    minHeight: 40,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.backgroundSoft,
+  },
+  appGuideSmallButtonText: {
+    color: colors.text,
+    fontWeight: "900",
+  },
+  appGuidePrimaryButton: {
+    minHeight: 40,
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+  },
+  appGuidePrimaryText: {
+    color: "#091220",
+    fontWeight: "900",
+  },
   sessionSheet: {
     flex: 1,
     backgroundColor: colors.background,
@@ -2712,7 +3098,12 @@ const cameraStyles = StyleSheet.create({
   },
   poseReferenceImage: {
     width: "100%",
+    height: 190,
     marginTop: 12,
+    borderRadius: 14,
+    backgroundColor: colors.backgroundSoft,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   poseCueRow: {
     marginTop: 8,

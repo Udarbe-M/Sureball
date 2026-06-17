@@ -16,6 +16,7 @@ import FullGuideScreen from "./src/screens/FullGuideScreen";
 import ProfileMenuScreen from "./src/screens/ProfileMenuScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
 import ChangePasswordScreen from "./src/screens/ChangePasswordScreen";
+import DataPrivacyConsentScreen from "./src/screens/DataPrivacyConsentScreen";
 import BrandMark from "./src/components/BrandMark";
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
 import { colors } from "./src/theme/colors";
@@ -68,7 +69,7 @@ function AuthLoadingScreen() {
 }
 
 function AppNavigator() {
-  const { isAuthenticated, loading } = useAuth();
+  const { hasDataPrivacyConsent, isAuthenticated, loading } = useAuth();
 
   if (loading) {
     return <AuthLoadingScreen />;
@@ -78,7 +79,7 @@ function AppNavigator() {
     <NavigationContainer theme={navTheme}>
       <StatusBar style="light" />
       <Stack.Navigator
-        initialRouteName={isAuthenticated ? "CoachingModes" : "Login"}
+        initialRouteName={!isAuthenticated ? "Login" : hasDataPrivacyConsent ? "CoachingModes" : "DataPrivacyConsent"}
         screenOptions={{
           headerStyle: { backgroundColor: colors.cardElevated },
           headerTintColor: colors.text,
@@ -87,7 +88,9 @@ function AppNavigator() {
           contentStyle: { backgroundColor: colors.background },
         }}
       >
-        {isAuthenticated ? (
+        {isAuthenticated && !hasDataPrivacyConsent ? (
+          <Stack.Screen name="DataPrivacyConsent" component={DataPrivacyConsentScreen} options={{ headerShown: false }} />
+        ) : isAuthenticated ? (
           <>
             <Stack.Screen
               name="CoachingModes"

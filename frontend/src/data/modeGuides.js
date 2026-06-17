@@ -17,23 +17,8 @@ const MODE_GUIDES = {
       "Finish with a soft wrist snap and balanced landing.",
     ],
     image: require("../../assets/reference-poses/shooting-optimal.png"),
+    motionGif: require("../../assets/reference-poses/shooting-motion.gif"),
     imageAlt: "Ideal basketball shooting form illustration",
-    motionGuide: {
-      phases: [
-        {
-          id: "start",
-          label: "Start",
-          cue: "Load from a balanced base with bent knees and the ball stacked over the shooting elbow.",
-          transform: { scale: 1.02, translateX: -6, translateY: 10 },
-        },
-        {
-          id: "finish",
-          label: "Finish",
-          cue: "Rise into the release, snap the wrist softly, and land balanced in the same shooting lane.",
-          transform: { scale: 1.08, translateX: 6, translateY: -8 },
-        },
-      ],
-    },
     fullGuideTitle: "Shooting Full Guide",
     fullGuideIntro: "Use this as the target shape before you chase a higher score. The cleaner the setup, the easier the release is to repeat.",
     keyCues: [
@@ -86,23 +71,8 @@ const MODE_GUIDES = {
       "Keep weight centered instead of rocking side to side.",
     ],
     image: require("../../assets/reference-poses/dribbling-optimal.png"),
+    motionGif: require("../../assets/reference-poses/dribbling-motion.gif"),
     imageAlt: "Ideal basketball dribbling stance illustration",
-    motionGuide: {
-      phases: [
-        {
-          id: "start",
-          label: "Start",
-          cue: "Begin low with hips dropped, chest up, and the ball controlled below the hip line.",
-          transform: { scale: 1.02, translateX: -8, translateY: 12 },
-        },
-        {
-          id: "finish",
-          label: "Finish",
-          cue: "Meet the ball early after the bounce and keep the next dribble close to the body with steady balance.",
-          transform: { scale: 1.07, translateX: 8, translateY: -6 },
-        },
-      ],
-    },
     fullGuideTitle: "Dribbling Full Guide",
     fullGuideIntro: "The goal is controlled movement, not just speed. A lower, quieter stance usually gives a steadier score and cleaner review video.",
     keyCues: [
@@ -155,23 +125,8 @@ const MODE_GUIDES = {
       "Stay upright instead of leaning off-balance.",
     ],
     image: require("../../assets/reference-poses/passing-optimal.png"),
+    motionGif: require("../../assets/reference-poses/passing-motion.gif"),
     imageAlt: "Ideal basketball chest pass illustration",
-    motionGuide: {
-      phases: [
-        {
-          id: "start",
-          label: "Start",
-          cue: "Start with the ball at the chest and the body loaded so the step supports the pass.",
-          transform: { scale: 1.02, translateX: -6, translateY: 8 },
-        },
-        {
-          id: "finish",
-          label: "Finish",
-          cue: "Step through the target line, extend both arms, and finish with wrists snapped toward the receiver.",
-          transform: { scale: 1.08, translateX: 8, translateY: -8 },
-        },
-      ],
-    },
     fullGuideTitle: "Passing Full Guide",
     fullGuideIntro: "A good pass is direct, balanced, and repeatable. SureBall scores best when the body shape and release line stay clear through the pass.",
     keyCues: [

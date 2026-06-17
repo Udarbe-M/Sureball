@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { DATA_PRIVACY_CONSENT_VERSION } from "../constants/privacy";
 import {
   ensureProfileForUser,
   fetchMyProfile,
@@ -13,6 +14,7 @@ import {
   subscribeToAuthChanges,
   updateCurrentPassword,
   updateCurrentPlayerName,
+  updateDataPrivacyConsentForUser,
 } from "../services/supabase";
 
 const AuthContext = createContext(null);
@@ -31,12 +33,32 @@ function buildFallbackName(session, profile) {
   return "Student Athlete";
 }
 
-function buildGuestSession({ id, playerName, createdAt }) {
+function hasCurrentDataPrivacyConsent(profile) {
+  return Boolean(
+    profile?.data_privacy_consent_accepted &&
+      profile?.data_privacy_consent_version === DATA_PRIVACY_CONSENT_VERSION
+  );
+}
+
+function buildGuestSession({
+  id,
+  playerName,
+  createdAt,
+  dataPrivacyConsentAccepted = false,
+  dataPrivacyConsentAcceptedAt = null,
+  dataPrivacyConsentVersion = null,
+}) {
+  const accepted = Boolean(dataPrivacyConsentAccepted);
   return {
     type: "guest",
     id,
     email: null,
     player_name: normalizePlayerName(playerName),
+    data_privacy_consent_accepted: accepted,
+    data_privacy_consent_accepted_at: accepted
+      ? dataPrivacyConsentAcceptedAt || new Date().toISOString()
+      : null,
+    data_privacy_consent_version: accepted ? dataPrivacyConsentVersion || DATA_PRIVACY_CONSENT_VERSION : null,
     created_at: createdAt || new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -57,6 +79,9 @@ async function readGuestSession() {
       id: parsed.id,
       playerName: parsed.player_name,
       createdAt: parsed.created_at,
+      dataPrivacyConsentAccepted: parsed.data_privacy_consent_accepted,
+      dataPrivacyConsentAcceptedAt: parsed.data_privacy_consent_accepted_at,
+      dataPrivacyConsentVersion: parsed.data_privacy_consent_version,
     });
   } catch (_error) {
     return null;
@@ -205,18 +230,28 @@ export function AuthProvider({ children }) {
       playerName: guestProfile?.player_name || buildFallbackName(session, profile),
       playerEmail: session?.user?.email ?? profile?.email ?? null,
       userId: session?.user?.id ?? profile?.id ?? guestProfile?.id ?? null,
-      async signIn({ email, password }) {
+      hasDataPrivacyConsent: hasCurrentDataPrivacyConsent(profile || guestProfile),
+      async signIn({ email, password, dataPrivacyConsentAccepted = false }) {
         setError("");
         await clearGuestSession();
         setGuestProfile(null);
-        return signInWithEmail({ email, password });
+        const result = await signInWithEmail({ email, password });
+        if (dataPrivacyConsentAccepted && result.session?.user) {
+          const updatedProfile = await updateDataPrivacyConsentForUser({
+            user: result.session.user,
+            fallbackPlayerName: buildFallbackName(result.session, null),
+          });
+          setProfile(updatedProfile);
+        }
+        return result;
       },
-      async signUp({ email, password, playerName, asGuest = false }) {
+      async signUp({ email, password, playerName, asGuest = false, dataPrivacyConsentAccepted = false }) {
         setError("");
         if (asGuest) {
           const nextGuestProfile = buildGuestSession({
             id: `guest:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
             playerName,
+            dataPrivacyConsentAccepted,
           });
           await clearGuestSession();
           await writeGuestSession(nextGuestProfile);
@@ -237,6 +272,7 @@ export function AuthProvider({ children }) {
           const nextProfile = await ensureProfileForUser({
             user: result.session.user,
             fallbackPlayerName: playerName,
+            dataPrivacyConsentAccepted,
           });
           setSession(result.session);
           setProfile(nextProfile);
@@ -249,6 +285,29 @@ export function AuthProvider({ children }) {
       async resendVerificationEmail(email) {
         setError("");
         return resendSignupVerification(email);
+      },
+      async acceptDataPrivacyConsent() {
+        setError("");
+        if (guestProfile?.id && !session?.user) {
+          const updatedGuestProfile = buildGuestSession({
+            id: guestProfile.id,
+            playerName: guestProfile.player_name,
+            createdAt: guestProfile.created_at,
+            dataPrivacyConsentAccepted: true,
+          });
+          await writeGuestSession(updatedGuestProfile);
+          setGuestProfile(updatedGuestProfile);
+          return updatedGuestProfile;
+        }
+        if (!session?.user) {
+          throw new Error("You must sign in before accepting data privacy consent.");
+        }
+        const updatedProfile = await updateDataPrivacyConsentForUser({
+          user: session.user,
+          fallbackPlayerName: buildFallbackName(session, profile),
+        });
+        setProfile(updatedProfile);
+        return updatedProfile;
       },
       async signOut() {
         setError("");
@@ -271,6 +330,9 @@ export function AuthProvider({ children }) {
             id: guestProfile.id,
             playerName: nextPlayerName,
             createdAt: guestProfile.created_at,
+            dataPrivacyConsentAccepted: guestProfile.data_privacy_consent_accepted,
+            dataPrivacyConsentAcceptedAt: guestProfile.data_privacy_consent_accepted_at,
+            dataPrivacyConsentVersion: guestProfile.data_privacy_consent_version,
           });
           await writeGuestSession(updatedGuestProfile);
           setGuestProfile(updatedGuestProfile);

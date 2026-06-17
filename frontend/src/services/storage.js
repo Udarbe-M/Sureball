@@ -6,6 +6,7 @@ const AUTO_SAVE_VIDEOS_KEY_PREFIX = "sureball_auto_save_videos_v1";
 const SESSION_HISTORY_LIMIT_KEY_PREFIX = "sureball_session_history_limit_v1";
 const RECORDING_COUNTDOWN_SECONDS_KEY_PREFIX = "sureball_recording_countdown_seconds_v1";
 const RECORDING_COUNTDOWN_SOUND_KEY_PREFIX = "sureball_recording_countdown_sound_v1";
+const APP_GUIDE_SEEN_KEY_PREFIX = "sureball_app_guide_seen_v1";
 const MAX_SESSION_HISTORY = 100;
 const DEFAULT_SESSION_HISTORY_LIMIT = MAX_SESSION_HISTORY;
 const SESSION_HISTORY_LIMIT_OPTIONS = [10, 25, 50, 100];
@@ -31,6 +32,10 @@ function recordingCountdownSecondsKeyForUser(userKey) {
 
 function recordingCountdownSoundKeyForUser(userKey) {
   return `${RECORDING_COUNTDOWN_SOUND_KEY_PREFIX}:${String(userKey || "anonymous")}`;
+}
+
+function appGuideSeenKeyForUser(userKey) {
+  return `${APP_GUIDE_SEEN_KEY_PREFIX}:${String(userKey || "anonymous")}`;
 }
 
 function recordKeyFor(record) {
@@ -151,6 +156,15 @@ export async function getRecordingCountdownSoundPreference(userKey) {
 
 export async function setRecordingCountdownSoundPreference(userKey, enabled) {
   await AsyncStorage.setItem(recordingCountdownSoundKeyForUser(userKey), enabled ? "true" : "false");
+}
+
+export async function getAppGuideSeenPreference(userKey) {
+  const raw = await AsyncStorage.getItem(appGuideSeenKeyForUser(userKey));
+  return raw === "true";
+}
+
+export async function setAppGuideSeenPreference(userKey, seen = true) {
+  await AsyncStorage.setItem(appGuideSeenKeyForUser(userKey), seen ? "true" : "false");
 }
 
 export async function setSessionHistoryLimitPreference(userKey, limit) {
