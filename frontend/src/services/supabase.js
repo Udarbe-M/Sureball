@@ -3,8 +3,11 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import "react-native-url-polyfill/auto";
 import { createClient, processLock } from "@supabase/supabase-js";
 import { SUPABASE_EMAIL_REDIRECT_TO, SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL } from "../config";
+import { DATA_PRIVACY_CONSENT_VERSION } from "../constants/privacy";
 
 const DEFAULT_PLAYER_NAME = "Student Athlete";
+const PROFILE_SELECT =
+  "id, email, player_name, data_privacy_consent_accepted, data_privacy_consent_accepted_at, data_privacy_consent_version, created_at, updated_at";
 
 export function normalizePlayerName(value) {
   const normalized = String(value || "")
@@ -43,6 +46,12 @@ export function isSupabaseReady() {
 function mapAuthError(error) {
   const message = String(error?.message || error || "").trim();
 
+  if (/email not confirmed/i.test(message) || /confirm.*email/i.test(message)) {
+    return new Error(
+      "This account exists, but Supabase is still blocking sign-in until the email is verified."
+    );
+  }
+
   if (/email address .* not authorized/i.test(message)) {
     return new Error(
       "This Supabase project is still using the default email sender. Verification emails only go to project team addresses until custom SMTP is configured."
@@ -56,6 +65,11 @@ function mapAuthError(error) {
   }
 
   return new Error(message || "Supabase authentication failed.");
+}
+
+function isEmailNotConfirmedError(error) {
+  const message = String(error?.message || error || "").trim();
+  return /email not confirmed/i.test(message) || /confirm.*email/i.test(message);
 }
 
 function requireSupabase() {
@@ -73,6 +87,9 @@ function mapProfileRow(row) {
     id: row.id,
     email: row.email,
     player_name: row.player_name,
+    data_privacy_consent_accepted: Boolean(row.data_privacy_consent_accepted),
+    data_privacy_consent_accepted_at: row.data_privacy_consent_accepted_at || null,
+    data_privacy_consent_version: row.data_privacy_consent_version || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -119,6 +136,7 @@ export async function signInWithEmail({ email, password }) {
 
 export async function signUpWithEmail({ email, password, playerName }) {
   const client = requireSupabase();
+  const normalizedEmail = String(email || "").trim().toLowerCase();
   const options = {
     data: {
       player_name: normalizePlayerName(playerName),
@@ -129,7 +147,7 @@ export async function signUpWithEmail({ email, password, playerName }) {
   }
 
   const { data, error } = await client.auth.signUp({
-    email: String(email || "").trim().toLowerCase(),
+    email: normalizedEmail,
     password,
     options,
   });
@@ -138,10 +156,40 @@ export async function signUpWithEmail({ email, password, playerName }) {
     throw mapAuthError(error);
   }
 
+  if (!data.session) {
+    const { data: signInData, error: signInError } = await client.auth.signInWithPassword({
+      email: normalizedEmail,
+      password,
+    });
+
+    if (signInError) {
+      if (isEmailNotConfirmedError(signInError)) {
+        return {
+          session: null,
+          user: data.user,
+          needsEmailVerification: true,
+          signInBlockedUntilVerified: true,
+          signInBlockedMessage:
+            "Account created, but this Supabase project still requires email verification before sign-in.",
+        };
+      }
+
+      throw mapAuthError(signInError);
+    }
+
+    return {
+      session: signInData.session,
+      user: signInData.user || data.user,
+      needsEmailVerification: !signInData.session,
+      signedInAfterSignup: Boolean(signInData.session),
+    };
+  }
+
   return {
     session: data.session,
     user: data.user,
-    needsEmailVerification: !data.session,
+    needsEmailVerification: false,
+    signedInAfterSignup: true,
   };
 }
 
@@ -178,7 +226,7 @@ export async function fetchMyProfile(userId) {
   const client = requireSupabase();
   const { data, error } = await client
     .from("profiles")
-    .select("id, email, player_name, created_at, updated_at")
+    .select(PROFILE_SELECT)
     .eq("id", userId)
     .maybeSingle();
 
@@ -189,7 +237,7 @@ export async function fetchMyProfile(userId) {
   return mapProfileRow(data);
 }
 
-export async function ensureProfileForUser({ user, fallbackPlayerName }) {
+export async function ensureProfileForUser({ user, fallbackPlayerName, dataPrivacyConsentAccepted = false }) {
   const client = requireSupabase();
   const payload = {
     id: user.id,
@@ -197,14 +245,55 @@ export async function ensureProfileForUser({ user, fallbackPlayerName }) {
     player_name: normalizePlayerName(fallbackPlayerName || user.user_metadata?.player_name),
   };
 
+  if (dataPrivacyConsentAccepted) {
+    payload.data_privacy_consent_accepted = true;
+    payload.data_privacy_consent_accepted_at = new Date().toISOString();
+    payload.data_privacy_consent_version = DATA_PRIVACY_CONSENT_VERSION;
+  }
+
   const { data, error } = await client
     .from("profiles")
     .upsert(payload, { onConflict: "id" })
-    .select("id, email, player_name, created_at, updated_at")
+    .select(PROFILE_SELECT)
     .single();
 
   if (error) {
     throw new Error(`Unable to store player profile: ${error.message}`);
+  }
+
+  return mapProfileRow(data);
+}
+
+export async function updateDataPrivacyConsentForUser({ user, fallbackPlayerName }) {
+  const client = requireSupabase();
+  const normalizedName = normalizePlayerName(fallbackPlayerName || user?.user_metadata?.player_name);
+  const { data: existingProfile, error: fetchError } = await client
+    .from("profiles")
+    .select(PROFILE_SELECT)
+    .eq("id", user.id)
+    .maybeSingle();
+
+  if (fetchError) {
+    throw new Error(`Unable to check player profile: ${fetchError.message}`);
+  }
+
+  const payload = {
+    id: user.id,
+    email: user.email ?? existingProfile?.email ?? null,
+    player_name: existingProfile?.player_name || normalizedName,
+    data_privacy_consent_accepted: true,
+    data_privacy_consent_accepted_at: new Date().toISOString(),
+    data_privacy_consent_version: DATA_PRIVACY_CONSENT_VERSION,
+  };
+
+  const { data, error } = await client
+    .from("profiles")
+    .upsert(payload, { onConflict: "id" })
+    .select(PROFILE_SELECT)
+    .single();
+
+  if (error) {
+    throw new Error(`Unable to store data privacy consent: ${error.message}`);
   }
 
   return mapProfileRow(data);
@@ -232,7 +321,7 @@ export async function updateCurrentPlayerName(playerName) {
       player_name: normalizedName,
     })
     .eq("id", user.id)
-    .select("id, email, player_name, created_at, updated_at")
+    .select(PROFILE_SELECT)
     .single();
 
   if (error) {

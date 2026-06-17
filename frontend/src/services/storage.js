@@ -4,9 +4,14 @@ import { Directory, File, Paths } from "expo-file-system";
 const SESSION_KEY_PREFIX = "sureball_session_history_v2";
 const AUTO_SAVE_VIDEOS_KEY_PREFIX = "sureball_auto_save_videos_v1";
 const SESSION_HISTORY_LIMIT_KEY_PREFIX = "sureball_session_history_limit_v1";
+const RECORDING_COUNTDOWN_SECONDS_KEY_PREFIX = "sureball_recording_countdown_seconds_v1";
+const RECORDING_COUNTDOWN_SOUND_KEY_PREFIX = "sureball_recording_countdown_sound_v1";
+const APP_GUIDE_SEEN_KEY_PREFIX = "sureball_app_guide_seen_v1";
 const MAX_SESSION_HISTORY = 100;
 const DEFAULT_SESSION_HISTORY_LIMIT = MAX_SESSION_HISTORY;
 const SESSION_HISTORY_LIMIT_OPTIONS = [10, 25, 50, 100];
+const RECORDING_COUNTDOWN_OPTIONS = [0, 3, 5, 10];
+const DEFAULT_RECORDING_COUNTDOWN_SECONDS = 3;
 const SESSION_VIDEO_DIRECTORY = new Directory(Paths.document, "sureball-session-videos");
 
 function sessionKeyForUser(userKey) {
@@ -21,6 +26,18 @@ function sessionHistoryLimitKeyForUser(userKey) {
   return `${SESSION_HISTORY_LIMIT_KEY_PREFIX}:${String(userKey || "anonymous")}`;
 }
 
+function recordingCountdownSecondsKeyForUser(userKey) {
+  return `${RECORDING_COUNTDOWN_SECONDS_KEY_PREFIX}:${String(userKey || "anonymous")}`;
+}
+
+function recordingCountdownSoundKeyForUser(userKey) {
+  return `${RECORDING_COUNTDOWN_SOUND_KEY_PREFIX}:${String(userKey || "anonymous")}`;
+}
+
+function appGuideSeenKeyForUser(userKey) {
+  return `${APP_GUIDE_SEEN_KEY_PREFIX}:${String(userKey || "anonymous")}`;
+}
+
 function recordKeyFor(record) {
   return String(record?.id || `${record?.mode || "session"}-${record?.timestamp || "unknown"}`);
 }
@@ -28,6 +45,11 @@ function recordKeyFor(record) {
 function normalizeHistoryLimit(value) {
   const numericValue = Number(value);
   return SESSION_HISTORY_LIMIT_OPTIONS.includes(numericValue) ? numericValue : DEFAULT_SESSION_HISTORY_LIMIT;
+}
+
+function normalizeRecordingCountdownSeconds(value) {
+  const numericValue = Number(value);
+  return RECORDING_COUNTDOWN_OPTIONS.includes(numericValue) ? numericValue : DEFAULT_RECORDING_COUNTDOWN_SECONDS;
 }
 
 function sanitizePathSegment(value, fallback = "session") {
@@ -111,6 +133,38 @@ export async function setAutoSaveVideosPreference(userKey, enabled) {
 export async function getSessionHistoryLimitPreference(userKey) {
   const raw = await AsyncStorage.getItem(sessionHistoryLimitKeyForUser(userKey));
   return normalizeHistoryLimit(raw);
+}
+
+export async function getRecordingCountdownSecondsPreference(userKey) {
+  const raw = await AsyncStorage.getItem(recordingCountdownSecondsKeyForUser(userKey));
+  return normalizeRecordingCountdownSeconds(raw);
+}
+
+export async function setRecordingCountdownSecondsPreference(userKey, seconds) {
+  const normalizedSeconds = normalizeRecordingCountdownSeconds(seconds);
+  await AsyncStorage.setItem(recordingCountdownSecondsKeyForUser(userKey), String(normalizedSeconds));
+  return normalizedSeconds;
+}
+
+export async function getRecordingCountdownSoundPreference(userKey) {
+  const raw = await AsyncStorage.getItem(recordingCountdownSoundKeyForUser(userKey));
+  if (raw === null) {
+    return true;
+  }
+  return raw !== "false";
+}
+
+export async function setRecordingCountdownSoundPreference(userKey, enabled) {
+  await AsyncStorage.setItem(recordingCountdownSoundKeyForUser(userKey), enabled ? "true" : "false");
+}
+
+export async function getAppGuideSeenPreference(userKey) {
+  const raw = await AsyncStorage.getItem(appGuideSeenKeyForUser(userKey));
+  return raw === "true";
+}
+
+export async function setAppGuideSeenPreference(userKey, seen = true) {
+  await AsyncStorage.setItem(appGuideSeenKeyForUser(userKey), seen ? "true" : "false");
 }
 
 export async function setSessionHistoryLimitPreference(userKey, limit) {
@@ -237,4 +291,4 @@ export function formatStorageBytes(bytes) {
   return `${(numericBytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-export { SESSION_HISTORY_LIMIT_OPTIONS };
+export { RECORDING_COUNTDOWN_OPTIONS, SESSION_HISTORY_LIMIT_OPTIONS };

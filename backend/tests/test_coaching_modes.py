@@ -56,8 +56,29 @@ class CoachingModeFeedbackTests(unittest.TestCase):
         counter.observe(_response(0, FeatureSet(ball_vertical_zone="torso", ball_to_wrist_distance=0.4)))
         counter.observe(_response(5, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
         counter.observe(_response(10, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
-        counter.observe(_response(15, FeatureSet(ball_vertical_zone="torso", ball_to_wrist_distance=0.4)))
+        counter.observe(_response(15, FeatureSet(ball_vertical_zone="torso", ball_to_wrist_distance=0.95)))
         counter.observe(_response(22, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
+
+        self.assertEqual(counter.count, 2)
+
+    def test_dribbling_counter_does_not_double_count_zone_flicker_without_release(self):
+        counter = CoachingActionCounter("dribbling", fps=30)
+
+        counter.observe(_response(0, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
+        counter.observe(_response(8, FeatureSet(ball_vertical_zone="torso", ball_to_wrist_distance=0.5)))
+        counter.observe(_response(16, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
+
+        self.assertEqual(counter.count, 1)
+
+    def test_dribbling_counter_requires_release_before_next_count(self):
+        counter = CoachingActionCounter("dribbling", fps=30)
+
+        counter.observe(_response(0, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
+        counter.observe(_response(8, FeatureSet(ball_vertical_zone="torso", ball_to_wrist_distance=0.55)))
+        counter.observe(_response(10, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
+        counter.observe(_response(18, FeatureSet(ball_vertical_zone="torso", ball_to_wrist_distance=0.95)))
+        counter.observe(_response(20, FeatureSet(ball_vertical_zone="high", ball_to_wrist_distance=1.05)))
+        counter.observe(_response(28, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
 
         self.assertEqual(counter.count, 2)
 

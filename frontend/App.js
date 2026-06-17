@@ -1,10 +1,11 @@
 import "react-native-gesture-handler";
-import React from "react";
+import React, { useEffect } from "react";
 import { DefaultTheme, NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { Feather } from "@expo/vector-icons";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
+import * as ScreenOrientation from "expo-screen-orientation";
 import LoginScreen from "./src/screens/LoginScreen";
 import DashboardScreen from "./src/screens/DashboardScreen";
 import LiveAnalysisScreen from "./src/screens/LiveAnalysisScreen";
@@ -15,6 +16,7 @@ import FullGuideScreen from "./src/screens/FullGuideScreen";
 import ProfileMenuScreen from "./src/screens/ProfileMenuScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
 import ChangePasswordScreen from "./src/screens/ChangePasswordScreen";
+import DataPrivacyConsentScreen from "./src/screens/DataPrivacyConsentScreen";
 import BrandMark from "./src/components/BrandMark";
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
 import { colors } from "./src/theme/colors";
@@ -67,7 +69,7 @@ function AuthLoadingScreen() {
 }
 
 function AppNavigator() {
-  const { isAuthenticated, loading } = useAuth();
+  const { hasDataPrivacyConsent, isAuthenticated, loading } = useAuth();
 
   if (loading) {
     return <AuthLoadingScreen />;
@@ -77,7 +79,7 @@ function AppNavigator() {
     <NavigationContainer theme={navTheme}>
       <StatusBar style="light" />
       <Stack.Navigator
-        initialRouteName={isAuthenticated ? "CoachingModes" : "Login"}
+        initialRouteName={!isAuthenticated ? "Login" : hasDataPrivacyConsent ? "CoachingModes" : "DataPrivacyConsent"}
         screenOptions={{
           headerStyle: { backgroundColor: colors.cardElevated },
           headerTintColor: colors.text,
@@ -86,7 +88,9 @@ function AppNavigator() {
           contentStyle: { backgroundColor: colors.background },
         }}
       >
-        {isAuthenticated ? (
+        {isAuthenticated && !hasDataPrivacyConsent ? (
+          <Stack.Screen name="DataPrivacyConsent" component={DataPrivacyConsentScreen} options={{ headerShown: false }} />
+        ) : isAuthenticated ? (
           <>
             <Stack.Screen
               name="CoachingModes"
@@ -127,6 +131,10 @@ function AppNavigator() {
 }
 
 export default function App() {
+  useEffect(() => {
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+  }, []);
+
   return (
     <AuthProvider>
       <AppNavigator />

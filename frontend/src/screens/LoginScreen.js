@@ -1,4 +1,5 @@
 import React, { useRef, useState } from "react";
+import { Feather } from "@expo/vector-icons";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -11,6 +12,7 @@ import {
   View,
 } from "react-native";
 import BrandMark from "../components/BrandMark";
+import { DATA_PRIVACY_CONSENT_COPY, DATA_PRIVACY_CONSENT_LABEL } from "../constants/privacy";
 import { useAuth } from "../context/AuthContext";
 import { isSupabaseReady, normalizePlayerName } from "../services/supabase";
 import { colors } from "../theme/colors";
@@ -24,6 +26,7 @@ export default function LoginScreen() {
   const [saving, setSaving] = useState(false);
   const [resendingVerification, setResendingVerification] = useState(false);
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState("");
+  const [privacyConsentAccepted, setPrivacyConsentAccepted] = useState(false);
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState("neutral");
   const scrollViewRef = useRef(null);
@@ -58,6 +61,12 @@ export default function LoginScreen() {
     const normalizedName = normalizePlayerName(name);
     const isGuestRegistration = authMode === "register" && registerMode === "guest";
 
+    if (!privacyConsentAccepted) {
+      setMessageTone("error");
+      setMessage("Please accept the data privacy consent before continuing.");
+      return;
+    }
+
     if (authMode === "register" && normalizedName.length < 2) {
       setMessageTone("error");
       setMessage("Enter a player name for the new account.");
@@ -74,6 +83,7 @@ export default function LoginScreen() {
         await signUp({
           playerName: normalizedName,
           asGuest: true,
+          dataPrivacyConsentAccepted: true,
         });
       } catch (error) {
         setMessageTone("error");
@@ -107,22 +117,39 @@ export default function LoginScreen() {
           email: normalizedEmail,
           password: normalizedPassword,
           playerName: normalizedName,
+          dataPrivacyConsentAccepted: true,
         });
 
-        if (result.needsEmailVerification) {
+        if (result.signInBlockedUntilVerified) {
           setPendingVerificationEmail(normalizedEmail);
+          setAuthMode("login");
+          setMessageTone("error");
+          setMessage(
+            "Account created, but sign-in is still blocked until email verification. To allow sign-in before verification, turn off required email confirmation in Supabase Auth settings."
+          );
+        } else if (result.needsEmailVerification) {
+          setPendingVerificationEmail(normalizedEmail);
+          setAuthMode("login");
           setMessageTone("success");
-          setMessage("Check your email to confirm the account, then return here to sign in.");
+          setMessage("Account created. You can sign in now, then verify your email later.");
+        } else {
+          setMessageTone("success");
+          setMessage("Account created. Signing you in now.");
         }
       } else {
         await signIn({
           email: normalizedEmail,
           password: normalizedPassword,
+          dataPrivacyConsentAccepted: true,
         });
       }
     } catch (error) {
+      const errorMessage = String(error.message || error);
+      if (/email verification|email is verified|email verified|email not confirmed|blocking sign-in/i.test(errorMessage)) {
+        setPendingVerificationEmail(normalizedEmail);
+      }
       setMessageTone("error");
-      setMessage(String(error.message || error));
+      setMessage(errorMessage);
     } finally {
       setSaving(false);
     }
@@ -182,7 +209,7 @@ export default function LoginScreen() {
                 ? "Open the camera, record a clip, and get coaching feedback."
                 : registerMode === "guest"
                   ? "Create a local guest profile and start recording right away."
-                  : "Create your player account, then use the camera coaching flow."}
+                  : "Create your player account and continue right away. Email verification can be completed later."}
             </Text>
 
             <View style={authStyles.toggleRow}>
@@ -290,13 +317,35 @@ export default function LoginScreen() {
               <Text style={authStyles.smallHint}>Testing locally? Switch to Sign up and choose Guest.</Text>
             ) : null}
 
+            <View style={authStyles.consentCard}>
+              <View style={authStyles.consentHeader}>
+                <Feather name="shield" size={16} color={colors.primary} />
+                <Text style={authStyles.consentTitle}>Data Privacy Consent</Text>
+              </View>
+              {DATA_PRIVACY_CONSENT_COPY.map((item) => (
+                <Text key={item} style={authStyles.consentCopy}>
+                  {item}
+                </Text>
+              ))}
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => setPrivacyConsentAccepted((current) => !current)}
+                style={authStyles.checkboxRow}
+              >
+                <View style={[authStyles.checkboxBox, privacyConsentAccepted && authStyles.checkboxBoxActive]}>
+                  {privacyConsentAccepted ? <Feather name="check" size={14} color="#091220" /> : null}
+                </View>
+                <Text style={authStyles.checkboxText}>{DATA_PRIVACY_CONSENT_LABEL}</Text>
+              </TouchableOpacity>
+            </View>
+
             {message ? (
               <Text style={[authStyles.message, { color: messageTone === "success" ? colors.success : colors.danger }]}>
                 {message}
               </Text>
             ) : null}
 
-            {pendingVerificationEmail && authMode === "register" && registerMode === "account" ? (
+            {pendingVerificationEmail && registerMode === "account" ? (
               <TouchableOpacity
                 activeOpacity={0.85}
                 disabled={resendingVerification || saving}
@@ -310,7 +359,13 @@ export default function LoginScreen() {
             ) : null}
 
             <AuthButton
-              title={authMode === "login" ? "Sign in" : registerMode === "guest" ? "Continue as guest" : "Create account"}
+              title={
+                authMode === "login"
+                  ? "Sign in"
+                  : registerMode === "guest"
+                    ? "Continue as guest"
+                    : "Create account & sign in"
+              }
               onPress={handleSubmit}
               loading={saving}
               disabled={actionDisabled}
@@ -457,6 +512,58 @@ const authStyles = StyleSheet.create({
     marginTop: 12,
     color: colors.muted,
     fontSize: 12,
+  },
+  consentCard: {
+    marginTop: 16,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.backgroundSoft,
+    padding: 14,
+  },
+  consentHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  consentTitle: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  consentCopy: {
+    marginTop: 10,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  checkboxRow: {
+    marginTop: 13,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  checkboxBox: {
+    width: 22,
+    height: 22,
+    borderRadius: 7,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+  },
+  checkboxBoxActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary,
+  },
+  checkboxText: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: "800",
   },
   errorText: {
     marginTop: 12,

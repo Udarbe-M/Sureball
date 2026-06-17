@@ -1,6 +1,8 @@
 import unittest
 
-from backend.app.shot_training import SHOT_TRAINING_CONFIDENCE_OVERRIDES, ShotTrainingTracker
+import numpy as np
+
+from backend.app.shot_training import SHOT_TRAINING_CONFIDENCE_OVERRIDES, ShotTrainingTracker, _apply_orientation_correction
 
 
 def shot_detection():
@@ -44,6 +46,32 @@ def release_detection():
 
 
 class ShotTrainingTrackerTests(unittest.TestCase):
+    def test_explicit_landscape_orientation_preserves_landscape_output(self):
+        auto_rotated_portrait_frame = np.zeros((1280, 720, 3), dtype=np.uint8)
+
+        corrected = _apply_orientation_correction(
+            auto_rotated_portrait_frame,
+            90,
+            auto_orientation_enabled=True,
+            encoded_frame_size=(1280, 720),
+            source_orientation="landscape",
+        )
+
+        self.assertGreaterEqual(corrected.shape[1], corrected.shape[0])
+
+    def test_explicit_portrait_orientation_preserves_portrait_output(self):
+        raw_landscape_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+        corrected = _apply_orientation_correction(
+            raw_landscape_frame,
+            90,
+            auto_orientation_enabled=False,
+            encoded_frame_size=(1280, 720),
+            source_orientation="portrait",
+        )
+
+        self.assertGreaterEqual(corrected.shape[0], corrected.shape[1])
+
     def test_shot_training_keeps_lower_ball_confidence_thresholds(self):
         self.assertNotIn("ball", SHOT_TRAINING_CONFIDENCE_OVERRIDES)
         self.assertLess(SHOT_TRAINING_CONFIDENCE_OVERRIDES["ball_in_basket"], 0.70)
@@ -109,9 +137,14 @@ class ShotTrainingTrackerTests(unittest.TestCase):
             detections = []
             if frame_index <= 7 or 16 <= frame_index <= 20:
                 detections.extend(shot_detection())
+            if frame_index == 8:
+                detections.extend(release_detection())
             if frame_index in {12, 13}:
                 detections.extend(basket_detection())
                 detections.extend(direct_make_in_rim_detection())
+            if frame_index == 14:
+                detections.extend(basket_detection())
+                detections.extend(ball_under_basket_detection())
             tracker.observe(detections, frame_index)
 
         self.assertEqual(
@@ -245,6 +278,9 @@ class ShotTrainingTrackerTests(unittest.TestCase):
                 detections.extend(ball_above_rim_detection())
             if 19 <= frame_index <= 20:
                 detections.extend(direct_make_in_rim_detection())
+            if frame_index == 21:
+                detections.extend(basket_detection())
+                detections.extend(ball_under_basket_detection())
             tracker.observe(detections, frame_index)
 
         self.assertEqual(
@@ -252,7 +288,7 @@ class ShotTrainingTrackerTests(unittest.TestCase):
             {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
         )
 
-    def test_single_frame_low_confidence_direct_make_counts_with_ball_inside_hoop(self):
+    def test_single_frame_low_confidence_direct_make_without_entry_path_does_not_count(self):
         tracker = ShotTrainingTracker(30)
 
         for frame_index in range(40):
@@ -274,16 +310,18 @@ class ShotTrainingTrackerTests(unittest.TestCase):
 
         self.assertEqual(
             tracker.to_stats(),
-            {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
+            {"attempts": 0, "makes": 0, "misses": 0, "accuracy": 0.0},
         )
 
-    def test_confirmed_ball_in_basket_counts_during_active_shot_without_full_ball_path(self):
+    def test_confirmed_ball_in_basket_without_under_basket_counts_as_miss(self):
         tracker = ShotTrainingTracker(30)
 
-        for frame_index in range(40):
+        for frame_index in range(220):
             detections = []
             if frame_index <= 7:
                 detections.extend(shot_detection())
+            if frame_index == 8:
+                detections.extend(release_detection())
             if frame_index in {12, 13}:
                 detections.extend(basket_detection())
                 detections.extend(direct_make_in_rim_detection())
@@ -291,7 +329,7 @@ class ShotTrainingTrackerTests(unittest.TestCase):
 
         self.assertEqual(
             tracker.to_stats(),
-            {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
+            {"attempts": 1, "makes": 0, "misses": 1, "accuracy": 0.0},
         )
 
     def test_single_ball_in_basket_plus_under_basket_counts_as_make(self):
@@ -301,9 +339,12 @@ class ShotTrainingTrackerTests(unittest.TestCase):
             detections = []
             if frame_index <= 7:
                 detections.extend(shot_detection())
+            if frame_index == 11:
+                detections.extend(basket_detection())
+                detections.extend(ball_above_rim_detection())
             if frame_index in {12, 13}:
                 detections.extend(basket_detection())
-            if frame_index == 12:
+            if frame_index in {12, 13}:
                 detections.extend(direct_make_in_rim_detection())
             if frame_index == 13:
                 detections.extend(ball_under_basket_detection())
@@ -333,10 +374,10 @@ class ShotTrainingTrackerTests(unittest.TestCase):
             {"attempts": 1, "makes": 0, "misses": 1, "accuracy": 0.0},
         )
 
-    def test_repeated_ball_overlap_with_basket_core_counts_as_make(self):
+    def test_repeated_ball_overlap_with_basket_core_without_pass_counts_as_miss(self):
         tracker = ShotTrainingTracker(30)
 
-        for frame_index in range(40):
+        for frame_index in range(220):
             detections = []
             if frame_index <= 7:
                 detections.extend(shot_detection())
@@ -349,10 +390,10 @@ class ShotTrainingTrackerTests(unittest.TestCase):
 
         self.assertEqual(
             tracker.to_stats(),
-            {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
+            {"attempts": 1, "makes": 0, "misses": 1, "accuracy": 0.0},
         )
 
-    def test_repeated_ball_overlap_without_shooting_pose_counts_as_make(self):
+    def test_repeated_ball_overlap_without_shooting_pose_does_not_count(self):
         tracker = ShotTrainingTracker(30)
 
         for frame_index in range(40):
@@ -364,7 +405,27 @@ class ShotTrainingTrackerTests(unittest.TestCase):
 
         self.assertEqual(
             tracker.to_stats(),
-            {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
+            {"attempts": 0, "makes": 0, "misses": 0, "accuracy": 0.0},
+        )
+
+    def test_hoop_only_rim_pass_without_direct_make_or_shot_signal_does_not_count(self):
+        tracker = ShotTrainingTracker(30)
+
+        for frame_index in range(40):
+            detections = []
+            if frame_index in {10, 11, 12}:
+                detections.extend(basket_detection())
+            if frame_index == 10:
+                detections.extend(ball_above_rim_detection())
+            if frame_index == 11:
+                detections.extend(ball_entering_rim_detection())
+            if frame_index == 12:
+                detections.extend(ball_under_basket_detection())
+            tracker.observe(detections, frame_index)
+
+        self.assertEqual(
+            tracker.to_stats(),
+            {"attempts": 0, "makes": 0, "misses": 0, "accuracy": 0.0},
         )
 
     def test_late_shooting_label_after_hoop_only_make_does_not_duplicate_attempt(self):
@@ -372,9 +433,16 @@ class ShotTrainingTrackerTests(unittest.TestCase):
 
         for frame_index in range(80):
             detections = []
-            if frame_index in {12, 13, 14, 15}:
+            if frame_index == 11:
                 detections.extend(basket_detection())
-                detections.extend(ball_overlapping_basket_core_detection())
+                detections.extend(ball_above_rim_detection())
+            if frame_index in {12, 13}:
+                detections.extend(basket_detection())
+            if frame_index in {12, 13}:
+                detections.extend(direct_make_in_rim_detection())
+            if frame_index == 14:
+                detections.extend(basket_detection())
+                detections.extend(ball_under_basket_detection())
             if 48 <= frame_index <= 54:
                 detections.extend(shot_detection())
             tracker.observe(detections, frame_index)
@@ -383,6 +451,32 @@ class ShotTrainingTrackerTests(unittest.TestCase):
             tracker.to_stats(),
             {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
         )
+
+    def test_rebound_back_to_hoop_after_make_does_not_count_as_second_shot(self):
+        tracker = ShotTrainingTracker(30)
+
+        for frame_index in range(120):
+            detections = []
+            if frame_index <= 7:
+                detections.extend(shot_detection())
+            if frame_index == 8:
+                detections.extend(release_detection())
+            if frame_index in {12, 13}:
+                detections.extend(basket_detection())
+                detections.extend(direct_make_in_rim_detection())
+            if frame_index == 14:
+                detections.extend(basket_detection())
+                detections.extend(ball_under_basket_detection())
+            if frame_index in {61, 62, 63, 64}:
+                detections.extend(basket_detection())
+                detections.extend(ball_overlapping_basket_core_detection())
+            tracker.observe(detections, frame_index)
+
+        self.assertEqual(
+            tracker.to_stats(),
+            {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
+        )
+        self.assertEqual(len(tracker.to_shot_events()), 1)
 
     def test_single_ball_overlap_with_basket_core_does_not_count_as_make(self):
         tracker = ShotTrainingTracker(30)
@@ -403,14 +497,20 @@ class ShotTrainingTrackerTests(unittest.TestCase):
             {"attempts": 1, "makes": 0, "misses": 1, "accuracy": 0.0},
         )
 
-    def test_delayed_shooting_label_uses_recent_basket_overlap_make(self):
+    def test_delayed_shooting_label_uses_recent_confirmed_hoop_only_make(self):
         tracker = ShotTrainingTracker(30)
 
         for frame_index in range(80):
             detections = []
-            if frame_index in {10, 11, 12, 13}:
+            if frame_index == 9:
                 detections.extend(basket_detection())
-                detections.extend(ball_overlapping_basket_core_detection())
+                detections.extend(ball_above_rim_detection())
+            if frame_index in {10, 11}:
+                detections.extend(basket_detection())
+            if frame_index in {10, 11}:
+                detections.extend(direct_make_in_rim_detection())
+            if frame_index == 11:
+                detections.extend(ball_under_basket_detection())
             if frame_index in {39, 40}:
                 detections.extend(shot_detection())
             tracker.observe(detections, frame_index)
@@ -425,9 +525,15 @@ class ShotTrainingTrackerTests(unittest.TestCase):
 
         for frame_index in range(220):
             detections = []
-            if frame_index in {10, 11, 12, 13}:
+            if frame_index == 9:
                 detections.extend(basket_detection())
-                detections.extend(ball_overlapping_basket_core_detection())
+                detections.extend(ball_above_rim_detection())
+            if frame_index in {10, 11}:
+                detections.extend(basket_detection())
+            if frame_index in {10, 11}:
+                detections.extend(direct_make_in_rim_detection())
+            if frame_index == 11:
+                detections.extend(ball_under_basket_detection())
             if frame_index in {80, 81}:
                 detections.extend(shot_detection())
             if frame_index == 82:
@@ -458,10 +564,10 @@ class ShotTrainingTrackerTests(unittest.TestCase):
 
         self.assertEqual(
             tracker.to_stats(),
-            {"attempts": 2, "makes": 1, "misses": 1, "accuracy": 50.0},
+            {"attempts": 2, "makes": 0, "misses": 2, "accuracy": 0.0},
         )
 
-    def test_late_rim_bounce_make_recovers_recent_miss_without_ghost_attempt(self):
+    def test_late_rim_overlap_without_clear_pass_stays_miss(self):
         tracker = ShotTrainingTracker(30)
 
         for frame_index in range(140):
@@ -477,12 +583,12 @@ class ShotTrainingTrackerTests(unittest.TestCase):
 
         self.assertEqual(
             tracker.to_stats(),
-            {"attempts": 1, "makes": 1, "misses": 0, "accuracy": 100.0},
+            {"attempts": 1, "makes": 0, "misses": 1, "accuracy": 0.0},
         )
         self.assertEqual(len(tracker.to_shot_events()), 1)
-        self.assertEqual(tracker.to_shot_events()[0]["result"], "make")
+        self.assertEqual(tracker.to_shot_events()[0]["result"], "miss")
 
-    def test_new_shot_cluster_recovers_previous_attempt_and_keeps_new_attempt_pending(self):
+    def test_new_shot_cluster_without_clear_make_keeps_both_as_misses(self):
         tracker = ShotTrainingTracker(30)
 
         for frame_index in range(100):
@@ -501,7 +607,7 @@ class ShotTrainingTrackerTests(unittest.TestCase):
 
         self.assertEqual(
             tracker.to_stats(),
-            {"attempts": 2, "makes": 1, "misses": 1, "accuracy": 50.0},
+            {"attempts": 2, "makes": 0, "misses": 2, "accuracy": 0.0},
         )
 
     def test_pending_attempt_can_be_discarded_at_end_of_clip(self):

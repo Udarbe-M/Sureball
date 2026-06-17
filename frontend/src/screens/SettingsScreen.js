@@ -1,15 +1,22 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { Feather } from "@expo/vector-icons";
 import { Alert, ScrollView, Switch, Text, TouchableOpacity, View } from "react-native";
+import { DATA_PRIVACY_CONSENT_COPY, DATA_PRIVACY_CONSENT_VERSION } from "../constants/privacy";
 import { useAuth } from "../context/AuthContext";
 import { healthCheck } from "../services/api";
 import {
+  RECORDING_COUNTDOWN_OPTIONS,
   SESSION_HISTORY_LIMIT_OPTIONS,
   clearSavedSessionVideos,
   formatStorageBytes,
   getAutoSaveVideosPreference,
+  getRecordingCountdownSecondsPreference,
+  getRecordingCountdownSoundPreference,
   getSessionHistoryLimitPreference,
   getSessionStorageStats,
   setAutoSaveVideosPreference,
+  setRecordingCountdownSecondsPreference,
+  setRecordingCountdownSoundPreference,
   setSessionHistoryLimitPreference,
 } from "../services/storage";
 import { colors } from "../theme/colors";
@@ -19,6 +26,12 @@ import { buildUserKey } from "../utils/userKey";
 export default function SettingsScreen({ navigation }) {
   const { isGuest, playerEmail, playerName, profile, userId } = useAuth();
   const userPersisted = Boolean(profile?.id) && !isGuest;
+  const consentAccepted = Boolean(
+    profile?.data_privacy_consent_accepted &&
+      profile?.data_privacy_consent_version === DATA_PRIVACY_CONSENT_VERSION
+  );
+  const consentAcceptedAt = formatConsentDate(profile?.data_privacy_consent_accepted_at);
+  const consentStorageLabel = isGuest ? "Stored locally on this device" : "Stored in your Supabase profile";
   const userKey = useMemo(
     () => buildUserKey({ userId, playerName, playerEmail }),
     [playerEmail, playerName, userId]
@@ -27,6 +40,10 @@ export default function SettingsScreen({ navigation }) {
   const [savingAutoSave, setSavingAutoSave] = useState(false);
   const [historyLimit, setHistoryLimit] = useState(100);
   const [savingHistoryLimit, setSavingHistoryLimit] = useState(false);
+  const [recordingCountdownSeconds, setRecordingCountdownSeconds] = useState(3);
+  const [recordingCountdownSound, setRecordingCountdownSound] = useState(true);
+  const [savingCountdown, setSavingCountdown] = useState(false);
+  const [savingCountdownSound, setSavingCountdownSound] = useState(false);
   const [storageStats, setStorageStats] = useState({ bytes: 0, savedVideoCount: 0, sessionCount: 0 });
   const [storageMessage, setStorageMessage] = useState("");
   const [storageMessageTone, setStorageMessageTone] = useState("neutral");
@@ -57,12 +74,16 @@ export default function SettingsScreen({ navigation }) {
       getAutoSaveVideosPreference(userKey),
       getSessionHistoryLimitPreference(userKey),
       getSessionStorageStats(userKey),
+      getRecordingCountdownSecondsPreference(userKey),
+      getRecordingCountdownSoundPreference(userKey),
     ])
-      .then(([enabled, limit, stats]) => {
+      .then(([enabled, limit, stats, countdownSeconds, countdownSound]) => {
         if (mounted) {
           setAutoSaveVideos(enabled);
           setHistoryLimit(limit);
           setStorageStats(stats);
+          setRecordingCountdownSeconds(countdownSeconds);
+          setRecordingCountdownSound(countdownSound);
         }
       })
       .catch(() => {
@@ -121,6 +142,51 @@ export default function SettingsScreen({ navigation }) {
     }
   }
 
+  async function handleCountdownChange(seconds) {
+    if (savingCountdown || Number(seconds) === Number(recordingCountdownSeconds)) {
+      return;
+    }
+
+    const previousSeconds = recordingCountdownSeconds;
+    setRecordingCountdownSeconds(seconds);
+    setSavingCountdown(true);
+    setStorageMessage("");
+
+    try {
+      const normalizedSeconds = await setRecordingCountdownSecondsPreference(userKey, seconds);
+      setRecordingCountdownSeconds(normalizedSeconds);
+      setStorageMessageTone("success");
+      setStorageMessage(
+        normalizedSeconds > 0
+          ? `Recording countdown set to ${normalizedSeconds} seconds.`
+          : "Recording countdown is turned off."
+      );
+    } catch (error) {
+      setRecordingCountdownSeconds(previousSeconds);
+      Alert.alert("Setting not saved", String(error.message || error));
+    } finally {
+      setSavingCountdown(false);
+    }
+  }
+
+  async function handleCountdownSoundToggle(enabled) {
+    const previousValue = recordingCountdownSound;
+    setRecordingCountdownSound(enabled);
+    setSavingCountdownSound(true);
+    setStorageMessage("");
+
+    try {
+      await setRecordingCountdownSoundPreference(userKey, enabled);
+      setStorageMessageTone("success");
+      setStorageMessage(enabled ? "Countdown sound is enabled." : "Countdown sound is muted.");
+    } catch (error) {
+      setRecordingCountdownSound(previousValue);
+      Alert.alert("Setting not saved", String(error.message || error));
+    } finally {
+      setSavingCountdownSound(false);
+    }
+  }
+
   function handleClearSavedVideos() {
     if (!storageStats.savedVideoCount || clearingVideos) {
       return;
@@ -159,6 +225,51 @@ export default function SettingsScreen({ navigation }) {
         <Text style={commonStyles.eyebrow}>Settings</Text>
         <Text style={[commonStyles.title, { marginTop: 10 }]}>App Preferences</Text>
         <Text style={commonStyles.subtitle}>Manage storage, system status, and training app behavior.</Text>
+      </View>
+
+      <View style={commonStyles.card}>
+        <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 14 }}>
+          <View style={{ flex: 1 }}>
+            <Text style={commonStyles.label}>Data Privacy</Text>
+            <Text style={[commonStyles.sectionTitle, { marginTop: 10 }]}>Video Processing Consent</Text>
+            <Text style={commonStyles.subtitle}>
+              {DATA_PRIVACY_CONSENT_COPY[0]}
+            </Text>
+          </View>
+          <View
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 22,
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: consentAccepted ? "rgba(56, 211, 159, 0.12)" : "rgba(255, 200, 87, 0.12)",
+              borderWidth: 1,
+              borderColor: consentAccepted ? "rgba(56, 211, 159, 0.34)" : "rgba(255, 200, 87, 0.34)",
+            }}
+          >
+            <Feather name={consentAccepted ? "shield" : "alert-triangle"} size={21} color={consentAccepted ? colors.success : colors.warning} />
+          </View>
+        </View>
+
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
+          <StatusPill
+            label={consentAccepted ? "Accepted" : "Needs Consent"}
+            color={consentAccepted ? colors.success : colors.warning}
+          />
+          <StatusPill label={profile?.data_privacy_consent_version || "No Version"} color={colors.secondary} />
+        </View>
+
+        <View style={{ marginTop: 14, gap: 10 }}>
+          <ConsentDetailRow label="Accepted" value={consentAcceptedAt} />
+          <ConsentDetailRow label="Profile Type" value={isGuest ? "Guest profile" : "Signed-in account"} />
+          <ConsentDetailRow label="Consent Record" value={consentStorageLabel} />
+        </View>
+
+        <Text style={[commonStyles.subtitle, { marginTop: 14 }]}>
+          This consent allows SureBall to process recorded or uploaded basketball videos for coaching feedback,
+          annotated videos, scores, and session history.
+        </Text>
       </View>
 
       <View style={commonStyles.card}>
@@ -261,6 +372,55 @@ export default function SettingsScreen({ navigation }) {
         </View>
       </View>
 
+      <View style={commonStyles.card}>
+        <Text style={commonStyles.label}>Recording Countdown</Text>
+        <Text style={[commonStyles.sectionTitle, { marginTop: 10 }]}>Start Delay</Text>
+        <Text style={commonStyles.subtitle}>
+          Give the player time to get into position before the recording and scoring clip starts.
+        </Text>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
+          {RECORDING_COUNTDOWN_OPTIONS.map((seconds) => {
+            const active = Number(recordingCountdownSeconds) === Number(seconds);
+            return (
+              <TouchableOpacity
+                key={seconds}
+                activeOpacity={0.9}
+                onPress={() => handleCountdownChange(seconds)}
+                disabled={savingCountdown}
+                style={{
+                  minWidth: 68,
+                  borderRadius: 999,
+                  borderWidth: 1,
+                  borderColor: active ? colors.primary : colors.border,
+                  backgroundColor: active ? colors.primary : colors.backgroundSoft,
+                  paddingHorizontal: 14,
+                  paddingVertical: 11,
+                  alignItems: "center",
+                  opacity: savingCountdown ? 0.65 : 1,
+                }}
+              >
+                <Text style={{ color: active ? "#091220" : colors.text, fontSize: 13, fontWeight: "900" }}>
+                  {seconds === 0 ? "Off" : `${seconds}s`}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        <View style={{ marginTop: 18, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 14 }}>
+          <View style={{ flex: 1 }}>
+            <Text style={[commonStyles.sectionTitle, { fontSize: 16 }]}>Countdown Sound</Text>
+            <Text style={commonStyles.subtitle}>Play a short cue on each countdown number.</Text>
+          </View>
+          <Switch
+            value={recordingCountdownSound}
+            onValueChange={handleCountdownSoundToggle}
+            thumbColor="#ffffff"
+            trackColor={{ false: colors.border, true: colors.primary }}
+            disabled={savingCountdownSound}
+          />
+        </View>
+      </View>
+
       {storageMessage ? (
         <Text
           style={{
@@ -303,6 +463,36 @@ export default function SettingsScreen({ navigation }) {
         <Text style={[commonStyles.buttonText, { color: colors.text }]}>Back To Camera</Text>
       </TouchableOpacity>
     </ScrollView>
+  );
+}
+
+function formatConsentDate(value) {
+  if (!value) {
+    return "Not recorded";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Not recorded";
+  }
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function ConsentDetailRow({ label, value }) {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+      <Text style={{ color: colors.muted, fontSize: 12, fontWeight: "800", textTransform: "uppercase", flex: 0.42 }}>
+        {label}
+      </Text>
+      <Text style={{ color: colors.text, fontSize: 13, lineHeight: 18, fontWeight: "800", textAlign: "right", flex: 0.58 }}>
+        {value}
+      </Text>
+    </View>
   );
 }
 

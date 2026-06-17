@@ -34,6 +34,12 @@ If you want verification emails to send users to a specific URL after confirmati
 
 Make sure the same URL is added to your Supabase Auth redirect allow list.
 
+## Sign in before verification
+
+The app now attempts to sign the user in immediately after email signup. To allow that flow in hosted Supabase, open `Authentication` > `Providers` > `Email` and turn off required email confirmation. Supabase treats those new users as confirmed immediately; with required confirmation enabled, Supabase blocks password sign-in until the email link is clicked, and client-side app code cannot bypass that block.
+
+Keep this template applied if the project keeps confirmation enabled or if you later add a separate verification/reminder flow.
+
 ## Delivery note
 
 Supabase's default email provider is only meant for limited testing. For non-team users in the APK, configure `Authentication > SMTP Settings` with a custom provider, otherwise confirmation emails may never be delivered.

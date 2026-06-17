@@ -38,7 +38,12 @@ export default function FullGuideScreen({ route, navigation }) {
 
       <View style={styles.poseCard}>
         <Text style={styles.poseEyebrow}>Ideal Form</Text>
-        <Image source={guide.image} accessibilityLabel={guide.imageAlt} style={styles.poseImage} resizeMode="contain" />
+        <Image
+          source={guide.motionGif || guide.image}
+          accessibilityLabel={guide.imageAlt}
+          style={styles.poseMotionImage}
+          resizeMode="contain"
+        />
         <Text style={styles.poseHeadline}>{guide.poseHeadline}</Text>
       </View>
 
@@ -97,7 +102,7 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     textTransform: "uppercase",
   },
-  poseImage: {
+  poseMotionImage: {
     width: "100%",
     height: 420,
     marginTop: 12,
