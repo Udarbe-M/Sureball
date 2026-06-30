@@ -29,6 +29,7 @@ function mergeHistory(localSessions, backendSessions) {
     remoteVideoUrl: item.remoteVideoUrl || buildRemoteVideoUrl(item.mode, item.id, item.sourceType),
     shootingStats: item.shootingStats || item.shooting_stats || null,
     shotEvents: normalizeShotEvents(item.shotEvents || item.shot_events),
+    phaseScores: normalizePhaseScores(item.phaseScores || item.phase_scores),
   }));
   const normalizedBackend = backendSessions.map((item) => ({
     id: item.session_id,
@@ -46,6 +47,7 @@ function mergeHistory(localSessions, backendSessions) {
     remoteVideoUrl: buildRemoteVideoUrl(item.mode, item.session_id, item.source_type),
     shootingStats: item.shooting_stats || null,
     shotEvents: normalizeShotEvents(item.shot_events),
+    phaseScores: normalizePhaseScores(item.phase_scores),
   }));
   const full = [...normalizedLocal, ...normalizedBackend];
   const seen = new Set();
@@ -59,6 +61,9 @@ function mergeHistory(localSessions, backendSessions) {
         existing.shootingStats = existing.shootingStats || entry.shootingStats;
         existing.actionCount = existing.actionCount || entry.actionCount;
         existing.actionLabel = existing.actionLabel || entry.actionLabel;
+        if ((!existing.phaseScores || existing.phaseScores.length === 0) && entry.phaseScores?.length) {
+          existing.phaseScores = entry.phaseScores;
+        }
         if ((!existing.shotEvents || existing.shotEvents.length === 0) && entry.shotEvents?.length) {
           existing.shotEvents = entry.shotEvents;
         }
@@ -107,6 +112,23 @@ function normalizeShotEvents(events) {
     .sort((a, b) => a.shotNumber - b.shotNumber);
 }
 
+function normalizePhaseScores(scores) {
+  if (!Array.isArray(scores)) {
+    return [];
+  }
+  return scores
+    .filter((phase) => String(phase?.key || "") !== "shot_pocket")
+    .map((phase, index) => ({
+      key: String(phase?.key || `phase-${index}`),
+      label: String(phase?.label || `Phase ${index + 1}`),
+      averageScore: Number(phase?.averageScore ?? phase?.average_score ?? 0) || 0,
+      frameCount: Number(phase?.frameCount ?? phase?.frame_count ?? 0) || 0,
+      status: String(phase?.status || "not_observed"),
+      focus: String(phase?.focus || ""),
+      cue: String(phase?.cue || ""),
+    }));
+}
+
 function numericOrNull(value) {
   if (value === null || value === undefined || value === "") {
     return null;
@@ -134,10 +156,15 @@ function shotResultColor(result) {
   return colors.secondary;
 }
 
-function scoreForTrend(item) {
-  if (item.mode === "shooting_form" && item.shootingStats?.attempts) {
-    return Number(item.shootingStats.accuracy || 0);
+function clampPercent(value) {
+  const numericValue = Number(value || 0);
+  if (!Number.isFinite(numericValue)) {
+    return 0;
   }
+  return Math.max(0, Math.min(Math.round(numericValue), 100));
+}
+
+function scoreForTrend(item) {
   if (item.score === null || item.score === undefined || item.score === "") {
     return Number.NaN;
   }
@@ -182,19 +209,68 @@ function buildProgressTrends(history) {
       );
       const latest = sorted[0];
       const previous = sorted[1];
+      const first = sorted[sorted.length - 1];
       const delta = previous ? latest.score - previous.score : null;
+      const totalGain = first ? latest.score - first.score : null;
+      const mastery = masteryForScore(latest.score);
+      const focusPhase = weakestObservedPhase(latest.item.phaseScores);
       return {
         mode,
         label: humanizeMode(mode),
-        metricLabel: mode === "shooting_form" ? "Accuracy" : "Score",
+        metricLabel: "Technique",
         latestScore: latest.score,
         delta,
+        totalGain,
+        mastery,
+        focusPhase,
+        improvementStreak: buildImprovementStreak(sorted),
         sessionCount: sorted.length,
         action: countForTrend(latest.item),
       };
     })
     .filter((trend) => trend.sessionCount > 0)
     .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function masteryForScore(score) {
+  const numericScore = Number(score || 0);
+  if (numericScore >= 90) {
+    return { label: "Mastered", color: colors.success };
+  }
+  if (numericScore >= 80) {
+    return { label: "Advanced", color: colors.secondary };
+  }
+  if (numericScore >= 70) {
+    return { label: "Proficient", color: colors.primary };
+  }
+  if (numericScore >= 58) {
+    return { label: "Developing", color: colors.warning };
+  }
+  return { label: "Foundation", color: colors.danger };
+}
+
+function buildImprovementStreak(sortedNewestFirst) {
+  const chronological = [...sortedNewestFirst].reverse();
+  if (chronological.length <= 1) {
+    return chronological.length;
+  }
+  let streak = 1;
+  for (let index = chronological.length - 1; index > 0; index -= 1) {
+    if (chronological[index].score >= chronological[index - 1].score) {
+      streak += 1;
+      continue;
+    }
+    break;
+  }
+  return streak;
+}
+
+function weakestObservedPhase(phases) {
+  const observed = normalizePhaseScores(phases).filter((phase) => phase.frameCount > 0);
+  if (observed.length === 0) {
+    return null;
+  }
+  return observed.sort((a, b) => a.averageScore - b.averageScore)[0];
 }
 
 function buildArchivedReviewEvents(item) {
@@ -402,7 +478,10 @@ export default function SessionHistoryScreen() {
 
       {modeTrends.length > 0 ? (
         <View style={commonStyles.card}>
-          <Text style={commonStyles.label}>Progress Trends</Text>
+          <Text style={commonStyles.label}>Mastery Progress</Text>
+          <Text style={[commonStyles.subtitle, { marginTop: 8 }]}>
+            Mastery compares the latest overall technique score with previous sessions in the same drill.
+          </Text>
           <View style={{ marginTop: 14, gap: 10 }}>
             {modeTrends.map((trend) => {
               const deltaColor =
@@ -411,6 +490,12 @@ export default function SessionHistoryScreen() {
                 trend.delta === null
                   ? "No comparison yet"
                   : `${trend.delta >= 0 ? "+" : ""}${trend.delta.toFixed(1)} from last`;
+              const totalGainLabel =
+                trend.totalGain === null
+                  ? "No baseline yet"
+                  : `${trend.totalGain >= 0 ? "+" : ""}${trend.totalGain.toFixed(1)} from first`;
+              const totalGainColor =
+                trend.totalGain === null ? colors.muted : trend.totalGain >= 0 ? colors.success : colors.warning;
               return (
                 <View
                   key={trend.mode}
@@ -430,19 +515,43 @@ export default function SessionHistoryScreen() {
                       </Text>
                     </View>
                     <View style={{ alignItems: "flex-end" }}>
-                      <Text style={{ color: colors.muted, fontSize: 10, fontWeight: "900", textTransform: "uppercase" }}>
-                        {trend.metricLabel}
+                      <Text style={{ color: trend.mastery.color, fontSize: 10, fontWeight: "900", textTransform: "uppercase" }}>
+                        {trend.mastery.label}
                       </Text>
                       <Text style={{ marginTop: 3, color: colors.primary, fontSize: 20, fontWeight: "900" }}>
                         {trend.latestScore.toFixed(1)}
-                        {trend.metricLabel === "Accuracy" ? "%" : ""}
                       </Text>
                     </View>
                   </View>
+                  <View
+                    style={{
+                      height: 7,
+                      borderRadius: 999,
+                      overflow: "hidden",
+                      backgroundColor: colors.track,
+                      marginTop: 12,
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: `${clampPercent(trend.latestScore)}%`,
+                        height: "100%",
+                        borderRadius: 999,
+                        backgroundColor: trend.mastery.color,
+                      }}
+                    />
+                  </View>
                   <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
                     <InfoPill label={deltaLabel} color={deltaColor} />
+                    <InfoPill label={totalGainLabel} color={totalGainColor} />
+                    <InfoPill label={`${trend.improvementStreak} session streak`} color={colors.secondary} />
                     {trend.action ? <InfoPill label={`${trend.action.label}: ${trend.action.value}`} color={colors.accent} /> : null}
                   </View>
+                  {trend.focusPhase ? (
+                    <Text style={[commonStyles.subtitle, { marginTop: 10, color: colors.text, fontSize: 12 }]}>
+                      Next mastery focus: {trend.focusPhase.label} ({trend.focusPhase.averageScore.toFixed(1)})
+                    </Text>
+                  ) : null}
                 </View>
               );
             })}
@@ -486,6 +595,8 @@ export default function SessionHistoryScreen() {
             {item.summary ? (
               <Text style={[commonStyles.subtitle, { marginTop: 14, color: colors.text }]}>{item.summary}</Text>
             ) : null}
+
+            {item.phaseScores?.length ? <ArchivedPhaseBreakdown phases={item.phaseScores} /> : null}
 
             <View style={commonStyles.divider} />
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
@@ -669,6 +780,76 @@ function classificationColor(classification) {
   if (label.includes("fair")) return colors.warning;
   if (label.includes("poor")) return colors.danger;
   return colors.text;
+}
+
+function phaseStatusColor(status) {
+  if (status === "excellent") return colors.success;
+  if (status === "good") return colors.secondary;
+  if (status === "developing") return colors.warning;
+  if (status === "needs_focus") return colors.danger;
+  return colors.muted;
+}
+
+function phaseStatusLabel(status) {
+  if (status === "excellent") return "Excellent";
+  if (status === "good") return "Good";
+  if (status === "developing") return "Developing";
+  if (status === "needs_focus") return "Needs Focus";
+  return "Not Observed";
+}
+
+function ArchivedPhaseBreakdown({ phases }) {
+  const visiblePhases = normalizePhaseScores(phases);
+  return (
+    <View
+      style={{
+        marginTop: 14,
+        borderRadius: 16,
+        borderWidth: 1,
+        borderColor: colors.border,
+        backgroundColor: colors.backgroundSoft,
+        padding: 12,
+      }}
+    >
+      <Text style={commonStyles.label}>Phase Breakdown</Text>
+      <View style={{ marginTop: 10, gap: 8 }}>
+        {visiblePhases.map((phase) => {
+          const color = phaseStatusColor(phase.status);
+          return (
+            <View key={phase.key}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 10 }}>
+                <Text style={{ flex: 1, color: colors.text, fontSize: 12, fontWeight: "900" }}>{phase.label}</Text>
+                <Text style={{ color, fontSize: 10, fontWeight: "900", textTransform: "uppercase" }}>
+                  {phaseStatusLabel(phase.status)}
+                </Text>
+              </View>
+              <View
+                style={{
+                  height: 6,
+                  marginTop: 6,
+                  borderRadius: 999,
+                  overflow: "hidden",
+                  backgroundColor: colors.track,
+                }}
+              >
+                <View
+                  style={{
+                    width: `${clampPercent(phase.averageScore)}%`,
+                    height: "100%",
+                    borderRadius: 999,
+                    backgroundColor: color,
+                  }}
+                />
+              </View>
+              <Text style={{ marginTop: 5, color: colors.muted, fontSize: 11, fontWeight: "800" }}>
+                {phase.frameCount > 0 ? `${phase.averageScore.toFixed(1)} from ${phase.frameCount} frames` : "No reliable frames"}
+              </Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
 }
 
 function ArchivedVideoPlayer({ videoUrl, reviewEvents = [] }) {

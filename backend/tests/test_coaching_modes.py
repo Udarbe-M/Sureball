@@ -27,8 +27,8 @@ class CoachingModeFeedbackTests(unittest.TestCase):
         feedback, summary = generate_feedback("dribbling", features, ball_detected=True)
         codes = {item.code for item in feedback}
 
-        self.assertIn("dribbling_ball_connection", codes)
         self.assertIn("dribbling_ball_height", codes)
+        self.assertIn("dribbling_ball_path", codes)
         self.assertIn("YOLOv11", summary)
         self.assertIn("MediaPipe", summary)
 
@@ -45,8 +45,8 @@ class CoachingModeFeedbackTests(unittest.TestCase):
         feedback, summary = generate_feedback("passing", features, ball_detected=True)
         codes = {item.code for item in feedback}
 
-        self.assertIn("passing_ball_connection", codes)
-        self.assertIn("passing_ball_window", codes)
+        self.assertIn("passing_elbow_extension", codes)
+        self.assertIn("passing_ball_path", codes)
         self.assertIn("YOLOv11", summary)
         self.assertIn("MediaPipe", summary)
 
@@ -56,7 +56,7 @@ class CoachingModeFeedbackTests(unittest.TestCase):
         counter.observe(_response(0, FeatureSet(ball_vertical_zone="torso", ball_to_wrist_distance=0.4)))
         counter.observe(_response(5, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
         counter.observe(_response(10, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
-        counter.observe(_response(15, FeatureSet(ball_vertical_zone="torso", ball_to_wrist_distance=0.95)))
+        counter.observe(_response(15, FeatureSet(ball_vertical_zone="high", ball_to_wrist_distance=0.95)))
         counter.observe(_response(22, FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=0.4)))
 
         self.assertEqual(counter.count, 2)
@@ -132,14 +132,26 @@ class CoachingModeFeedbackTests(unittest.TestCase):
 
                 self.assertTrue(result.pose_detected)
 
-    def test_shooting_setup_evidence_only_requires_pose_and_ball_visible(self):
+    def test_shooting_evidence_requires_release_window(self):
         response = SimpleNamespace(
             pose_detected=True,
             ball_detected=True,
             features=FeatureSet(ball_vertical_zone="low", ball_to_wrist_distance=1.4),
         )
 
+        self.assertFalse(_has_shooting_evidence(response))
+
+        response.features = FeatureSet(ball_vertical_zone="high", ball_to_wrist_distance=1.4)
         self.assertTrue(_has_shooting_evidence(response))
+
+    def test_shooting_setup_frame_does_not_score_as_perfect_release(self):
+        result = _run_frame(
+            mode="shooting_form",
+            ball_detector=_FakeBallDetector(confidence=0.72),
+            pose_visibility=POSE_CONFIDENCE_THRESHOLD,
+        )
+
+        self.assertLessEqual(result.score.score, 72)
 
     def test_shooting_detection_overlay_draws_player_shooting_and_basket_boxes_only(self):
         frame = np.zeros((80, 120, 3), dtype=np.uint8)

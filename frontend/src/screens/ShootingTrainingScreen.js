@@ -5,6 +5,7 @@ import { useAudioPlayer } from "expo-audio";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
 import * as ScreenOrientation from "expo-screen-orientation";
+import * as Speech from "expo-speech";
 import { VideoView, useVideoPlayer } from "expo-video";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Linking, ScrollView, Switch, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
@@ -25,6 +26,7 @@ import {
 import { commonStyles } from "../theme/styles";
 import { colors } from "../theme/colors";
 import { COUNTDOWN_BEEP_SOURCE, COUNTDOWN_START_BUZZER_SOURCE, wait } from "../utils/countdown";
+import { buildCoachingSpeech } from "../utils/coachingSpeech";
 import { buildUserKey } from "../utils/userKey";
 
 const OVERLAY_OPTIONS = [
@@ -230,6 +232,17 @@ export default function ShootingTrainingScreen({ navigation }) {
     }
     return buildShootingTrainingDownloadUrl(jobId);
   }, [jobId, status]);
+  const coachingSpeechText = useMemo(
+    () =>
+      buildCoachingSpeech({
+        modeLabel: "shooting training",
+        score: stats.accuracy,
+        classification,
+        summary,
+        stats,
+      }),
+    [classification, stats, summary]
+  );
 
   const selectedVideoLabel = useMemo(() => {
     if (!selectedVideo) {
@@ -856,6 +869,7 @@ export default function ShootingTrainingScreen({ navigation }) {
                 videoUrl={resultVideoUrl}
                 outputWidth={outputDimensions.width}
                 outputHeight={outputDimensions.height}
+                speechText={coachingSpeechText}
               />
             </View>
             <Text style={[commonStyles.subtitle, { marginTop: 10, fontSize: 12 }]}>
@@ -900,7 +914,7 @@ function clampPercent(value) {
   return Math.max(0, Math.min(Math.round(numericValue), 100));
 }
 
-function ResultVideoPlayer({ videoUrl, outputWidth = 0, outputHeight = 0 }) {
+function ResultVideoPlayer({ videoUrl, outputWidth = 0, outputHeight = 0, speechText = "" }) {
   const player = useVideoPlayer(
     {
       uri: videoUrl,
@@ -912,8 +926,82 @@ function ResultVideoPlayer({ videoUrl, outputWidth = 0, outputHeight = 0 }) {
     }
   );
   const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
+  const [coachingAudioEnabled, setCoachingAudioEnabled] = useState(true);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [speechStatus, setSpeechStatus] = useState(
+    speechText.trim() ? "Voice cues are ready for this review." : "Voice cues are not available for this review."
+  );
+  const spokenVideoRef = useRef(null);
+  const speechMountedRef = useRef(true);
   const outputIsLandscape = Number(outputWidth || 0) > Number(outputHeight || 0);
   const videoHeight = outputIsLandscape ? 220 : 320;
+
+  const speakCoachingFeedback = useCallback(() => {
+    const text = speechText.trim();
+    if (!text) {
+      setSpeechStatus("No coaching voice text was generated for this review.");
+      return;
+    }
+    if (speechMountedRef.current) {
+      setIsSpeaking(true);
+      setSpeechStatus("Playing coaching voice cues...");
+    }
+    Speech.stop();
+    Speech.speak(text, {
+      language: "en-US",
+      pitch: 1,
+      rate: 0.92,
+      onDone: () => {
+        if (!speechMountedRef.current) {
+          return;
+        }
+        setIsSpeaking(false);
+        setSpeechStatus("Voice cues finished. Tap Play Voice Cues to hear them again.");
+      },
+      onStopped: () => {
+        if (!speechMountedRef.current) {
+          return;
+        }
+        setIsSpeaking(false);
+        setSpeechStatus("Voice cues stopped.");
+      },
+      onError: (error) => {
+        if (!speechMountedRef.current) {
+          return;
+        }
+        setIsSpeaking(false);
+        setSpeechStatus(
+          `Voice cues could not play. Check the device media volume and Text-to-Speech settings. ${String(
+            error?.message || error || ""
+          ).trim()}`
+        );
+      },
+    });
+  }, [speechText]);
+
+  useEffect(() => {
+    spokenVideoRef.current = null;
+    setSpeechStatus(speechText.trim() ? "Voice cues are ready for this review." : "Voice cues are not available for this review.");
+  }, [speechText, videoUrl]);
+
+  useEffect(() => {
+    if (!coachingAudioEnabled || !speechText.trim() || spokenVideoRef.current === videoUrl) {
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      spokenVideoRef.current = videoUrl;
+      speakCoachingFeedback();
+    }, isPlaying ? 650 : 1100);
+    return () => clearTimeout(timer);
+  }, [coachingAudioEnabled, isPlaying, speakCoachingFeedback, speechText, videoUrl]);
+
+  useEffect(
+    () => () => {
+      speechMountedRef.current = false;
+      Speech.stop();
+    },
+    []
+  );
 
   return (
     <View>
@@ -932,6 +1020,10 @@ function ResultVideoPlayer({ videoUrl, outputWidth = 0, outputHeight = 0 }) {
               player.pause();
             } else {
               player.play();
+              if (coachingAudioEnabled && speechText.trim() && spokenVideoRef.current !== videoUrl) {
+                spokenVideoRef.current = videoUrl;
+                setTimeout(speakCoachingFeedback, 250);
+              }
             }
           }}
           style={{
@@ -948,6 +1040,66 @@ function ResultVideoPlayer({ videoUrl, outputWidth = 0, outputHeight = 0 }) {
             {isPlaying ? "Pause Preview" : "Play Preview"}
           </Text>
         </TouchableOpacity>
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+          <TouchableOpacity
+            accessibilityLabel="Replay coaching audio"
+            activeOpacity={0.9}
+            onPress={() => {
+              if (isSpeaking) {
+                Speech.stop();
+                return;
+              }
+              speakCoachingFeedback();
+            }}
+            style={{
+              flex: 1,
+              borderRadius: 14,
+              borderWidth: 1,
+              borderColor: colors.secondary,
+              paddingVertical: 11,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Feather name={isSpeaking ? "volume-x" : "volume-2"} size={16} color={colors.secondary} />
+            <Text style={{ marginTop: 4, color: colors.secondary, fontSize: 12, fontWeight: "800" }}>
+              {isSpeaking ? "Stop Voice" : "Play Voice Cues"}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            accessibilityLabel={coachingAudioEnabled ? "Mute coaching audio" : "Enable coaching audio"}
+            activeOpacity={0.9}
+            onPress={() => {
+              if (coachingAudioEnabled) {
+                Speech.stop();
+                setIsSpeaking(false);
+                setCoachingAudioEnabled(false);
+                setSpeechStatus("Auto voice is off. Tap Play Voice Cues if you still want to hear the feedback.");
+                return;
+              }
+              setCoachingAudioEnabled(true);
+              spokenVideoRef.current = videoUrl;
+              speakCoachingFeedback();
+            }}
+            style={{
+              flex: 1,
+              borderRadius: 14,
+              borderWidth: 1,
+              borderColor: colors.border,
+              paddingVertical: 11,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Feather name={coachingAudioEnabled ? "volume-x" : "volume-2"} size={16} color={colors.text} />
+            <Text style={{ marginTop: 4, color: colors.text, fontSize: 12, fontWeight: "800" }}>
+              {coachingAudioEnabled ? "Auto Voice On" : "Auto Voice Off"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <Text selectable style={{ marginTop: 10, color: colors.muted, fontSize: 12, lineHeight: 18 }}>
+          {speechStatus}
+        </Text>
       </View>
     </View>
   );

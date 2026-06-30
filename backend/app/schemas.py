@@ -81,6 +81,16 @@ class FrameAnalysisResponse(BaseModel):
     annotated_frame_base64: Optional[str] = None
 
 
+class PhaseScore(BaseModel):
+    key: str
+    label: str
+    average_score: float = 0.0
+    frame_count: int = 0
+    status: Literal["excellent", "good", "developing", "needs_focus", "not_observed"] = "not_observed"
+    focus: str
+    cue: str
+
+
 class VideoAnalysisResponse(BaseModel):
     session_id: str
     mode: CoachingMode
@@ -92,6 +102,7 @@ class VideoAnalysisResponse(BaseModel):
     worst_score: int
     classification: Literal["Excellent", "Good", "Needs Improvement", "Poor"]
     dominant_feedback: List[str]
+    phase_scores: List[PhaseScore] = Field(default_factory=list)
     frame_results: List[FrameAnalysisResponse]
     session_summary: str
 
@@ -108,6 +119,7 @@ class SessionRecord(BaseModel):
     action_label: Optional[str] = None
     shooting_stats: Dict[str, object] = Field(default_factory=dict)
     shot_events: List[Dict[str, object]] = Field(default_factory=list)
+    phase_scores: List[Dict[str, object]] = Field(default_factory=list)
     user_key: Optional[str] = None
 
 
@@ -180,6 +192,18 @@ class CoachingVideoStartResponse(BaseModel):
     source_orientation: SourceOrientation = "auto"
 
 
+class PoseComparisonMetric(BaseModel):
+    key: str
+    label: str
+    actual_value: Optional[float] = None
+    actual_display: str
+    reference_display: str
+    match_rate: float = 0.0
+    observed_frames: int = 0
+    status: Literal["matched", "close", "needs_focus", "insufficient"] = "insufficient"
+    coaching_cue: str
+
+
 class CoachingVideoStatusResponse(BaseModel):
     file_id: str
     mode: Optional[CoachingMode] = None
@@ -209,6 +233,8 @@ class CoachingVideoStatusResponse(BaseModel):
     shooting_stats: ShotTrainingStats = Field(default_factory=ShotTrainingStats)
     shot_events: List[ShotEvent] = Field(default_factory=list)
     dominant_feedback: List[str] = Field(default_factory=list)
+    pose_comparison: List[PoseComparisonMetric] = Field(default_factory=list)
+    phase_scores: List[PhaseScore] = Field(default_factory=list)
     classification: Optional[str] = None
     summary: Optional[str] = None
     error_message: Optional[str] = None

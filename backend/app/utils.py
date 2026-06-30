@@ -15,6 +15,7 @@ import numpy as np
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
 SESSION_HISTORY_PATH = DATA_DIR / "session_history.json"
+REMOVED_PHASE_KEYS = {"shot_pocket"}
 
 LANDMARK_NAMES = {
     0: "nose",
@@ -147,7 +148,7 @@ def draw_text_block(frame: np.ndarray, lines: List[str], origin: Tuple[int, int]
 def append_session_history(record: Dict[str, object]) -> None:
     ensure_data_dir()
     history = load_session_history()
-    history.append(record)
+    history.append(_sanitize_session_record(record))
     SESSION_HISTORY_PATH.write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
 
 
@@ -157,9 +158,22 @@ def load_session_history(user_key: Optional[str] = None) -> List[Dict[str, objec
     if not raw:
         return []
     history = json.loads(raw)
+    history = [_sanitize_session_record(record) for record in history]
     if user_key is None:
         return history
     return [record for record in history if str(record.get("user_key") or "") == str(user_key)]
+
+
+def _sanitize_session_record(record: Dict[str, object]) -> Dict[str, object]:
+    cleaned = dict(record)
+    phase_scores = cleaned.get("phase_scores")
+    if isinstance(phase_scores, list):
+        cleaned["phase_scores"] = [
+            phase
+            for phase in phase_scores
+            if not (isinstance(phase, dict) and str(phase.get("key") or "") in REMOVED_PHASE_KEYS)
+        ]
+    return cleaned
 
 
 def delete_session_history_record(session_id: str, user_key: Optional[str] = None) -> bool:

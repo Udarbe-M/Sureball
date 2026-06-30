@@ -5,10 +5,23 @@ import { useAudioPlayer } from "expo-audio";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
 import * as ScreenOrientation from "expo-screen-orientation";
+import * as Speech from "expo-speech";
 import { VideoView, useVideoPlayer } from "expo-video";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Image, Linking, PanResponder, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
+import {
+  ActivityIndicator,
+  Linking,
+  PanResponder,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TouchableOpacity,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import BrandMark from "../components/BrandMark";
+import CorePoseTutorialVideo from "../components/CorePoseTutorialVideo";
 import PrimaryButton from "../components/PrimaryButton";
 import { useAuth } from "../context/AuthContext";
 import { getModeGuide } from "../data/modeGuides";
@@ -29,6 +42,7 @@ import {
 } from "../services/storage";
 import { colors } from "../theme/colors";
 import { COUNTDOWN_BEEP_SOURCE, COUNTDOWN_START_BUZZER_SOURCE, wait } from "../utils/countdown";
+import { buildCoachingSpeech } from "../utils/coachingSpeech";
 import { buildUserKey } from "../utils/userKey";
 
 const MODES = [
@@ -36,7 +50,7 @@ const MODES = [
     id: "shooting_form",
     title: "Shooting",
     tag: "Shot",
-    description: "Review elbow line, knee load, ball release, and balance.",
+    description: "Review elbow line, comfortable base, ball release, and balance.",
     guideLabel: "Shooting Form",
     guideHint: "Elbow, base, release",
     guideIcon: "target",
@@ -45,7 +59,7 @@ const MODES = [
     id: "dribbling",
     title: "Dribbling",
     tag: "Handle",
-    description: "Track low handle control, ball-to-hand connection, stance, and balance.",
+    description: "Track low handle position, visible ball path, stance, and balance.",
     guideLabel: "Dribble Control",
     guideHint: "Stance, height, rhythm",
     guideIcon: "activity",
@@ -54,7 +68,7 @@ const MODES = [
     id: "passing",
     title: "Passing",
     tag: "Pass",
-    description: "Check passing line, hand-to-ball connection, release window, and body control.",
+    description: "Check passing line, visible ball path, release window, and body control.",
     guideLabel: "Passing Line",
     guideHint: "Step, release, finish",
     guideIcon: "send",
@@ -169,6 +183,8 @@ const INITIAL_COACHING_RESULTS = {
   classification: "",
   summary: "",
   dominantFeedback: [],
+  poseComparison: [],
+  phaseScores: [],
   inputWidth: 0,
   inputHeight: 0,
   outputWidth: 0,
@@ -205,6 +221,7 @@ function buildScoreExplanation({ activeMode, results }) {
     { label: "Score", value: `${Number(results.averageScore || 0).toFixed(1)} ${results.classification || ""}`.trim() },
     { label: "Tracking", value: `${Number(results.poseDetectionRate || 0).toFixed(1)}% pose, ${Number(results.ballDetectionRate || 0).toFixed(1)}% ball` },
     { label: "Action", value: shootingText },
+    { label: "Scoring Basis", value: "Frame-by-frame average; phase cards are diagnostic only." },
     { label: "Main cue", value: topCue },
   ];
 }
@@ -302,6 +319,23 @@ function normalizeShotEvents(events) {
     .sort((a, b) => a.shotNumber - b.shotNumber);
 }
 
+function normalizePhaseScores(scores) {
+  if (!Array.isArray(scores)) {
+    return [];
+  }
+  return scores
+    .filter((phase) => String(phase?.key || "") !== "shot_pocket")
+    .map((phase, index) => ({
+      key: String(phase?.key || `phase-${index}`),
+      label: String(phase?.label || `Phase ${index + 1}`),
+      averageScore: Number(phase?.averageScore ?? phase?.average_score ?? 0) || 0,
+      frameCount: Number(phase?.frameCount ?? phase?.frame_count ?? 0) || 0,
+      status: String(phase?.status || "not_observed"),
+      focus: String(phase?.focus || ""),
+      cue: String(phase?.cue || ""),
+    }));
+}
+
 function numericOrNull(value) {
   if (value === null || value === undefined || value === "") {
     return null;
@@ -351,7 +385,7 @@ function shotFeedbackText(result, reviewLevel = "beginner") {
   }
   if (result === "miss") {
     return reviewLevel === "intermediate"
-      ? "Missed shot. Review knee bend, release line, follow-through, and whether the ball path stayed centered."
+      ? "Missed shot. Review base balance, release line, follow-through, and whether the ball path stayed centered."
       : "Missed shot. Check balance, release line, and ball path.";
   }
   return reviewLevel === "intermediate"
@@ -434,7 +468,7 @@ function buildModeReview({ activeMode, results }) {
 
   if (activeMode.id === "dribbling") {
     const sections = [
-      buildReviewStatus("Ball Control", score, "Keep the ball close to your hand through each bounce."),
+      buildReviewStatus("Ball Path", score, "Keep the bounce close to your dribbling side and below hip height."),
       buildReviewStatus("Stance", Math.min(score, Number(results.poseDetectionRate || 0)), "Stay low with bent knees and balanced hips."),
       buildReviewStatus("Rhythm", actionCount > 0 ? 78 : 45, "Aim for steady bounces instead of rushed or missed contacts."),
     ];
@@ -442,11 +476,11 @@ function buildModeReview({ activeMode, results }) {
       title: "Dribbling Review",
       actionLabel: "Dribbles Counted",
       actionValue: actionCount,
-      intro: "Use this to check control, stance, and rhythm while watching the annotated clip.",
+      intro: "Use this to check ball path, stance, and rhythm while watching the annotated clip.",
       sections,
       moments: buildModeMomentCards(sections, "dribbling"),
       beginnerCue: focus,
-      intermediateCue: "Check if the ball stays near the hand, below the hip, and close to the body line.",
+      intermediateCue: "Check if the visible ball path stays below the hip and close to the body line.",
       nextDrill: "Next drill: 30 seconds of low controlled dribbles, then switch hands.",
       tracking,
     };
@@ -455,18 +489,18 @@ function buildModeReview({ activeMode, results }) {
   if (activeMode.id === "passing") {
     const sections = [
       buildReviewStatus("Release Line", score, "Finish with your hands pointed toward the target."),
-      buildReviewStatus("Ball Connection", Math.min(score, Number(results.ballDetectionRate || 0)), "Keep the ball connected to your hands before release."),
+      buildReviewStatus("Ball Path", Math.min(score, Number(results.ballDetectionRate || 0)), "Keep the ball visible and near the chest before it leaves your hands."),
       buildReviewStatus("Balance", Math.min(score, Number(results.poseDetectionRate || 0)), "Stay balanced instead of leaning out of the pass."),
     ];
     return {
       title: "Passing Review",
       actionLabel: "Passes Counted",
       actionValue: actionCount,
-      intro: "Use this to check release line, ball connection, and balance through the pass.",
+      intro: "Use this to check release line, visible ball path, and balance through the pass.",
       sections,
       moments: buildModeMomentCards(sections, "passing"),
       beginnerCue: focus,
-      intermediateCue: "Review elbow extension, wrist line, ball-to-hand distance, and balance at release.",
+      intermediateCue: "Review elbow extension, wrist line, visible ball path, and balance at release.",
       nextDrill: "Next drill: 10 chest passes, freeze your follow-through after every pass.",
       tracking,
     };
@@ -583,7 +617,6 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [overlayMode, setOverlayMode] = useState("focus_feedback");
   const [reviewLevel, setReviewLevel] = useState("beginner");
-  const [miniGoalsEnabled, setMiniGoalsEnabled] = useState(true);
   const [recordingStatus, setRecordingStatus] = useState("Frame the player, then record or upload a clip.");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
@@ -676,6 +709,18 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
     }
     return buildCoachingVideoDownloadUrl(jobId);
   }, [jobId, status]);
+  const coachingSpeechText = useMemo(
+    () =>
+      buildCoachingSpeech({
+        modeLabel: `${activeMode.title} coaching`,
+        score: coachingResults.averageScore,
+        classification: coachingResults.classification,
+        feedback: coachingResults.dominantFeedback,
+        summary: coachingResults.summary,
+        stats: activeMode.id === "shooting_form" ? coachingResults.shootingStats : null,
+      }),
+    [activeMode, coachingResults]
+  );
 
   const selectedVideoLabel = useMemo(() => {
     if (!selectedVideo) {
@@ -843,6 +888,8 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
           classification: result.classification || "",
           summary: result.summary || "",
           dominantFeedback: result.dominant_feedback || [],
+          poseComparison: result.pose_comparison || [],
+          phaseScores: normalizePhaseScores(result.phase_scores),
           inputWidth: result.input_width || 0,
           inputHeight: result.input_height || 0,
           outputWidth: result.output_width || 0,
@@ -875,6 +922,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
               actionLabel: result.action_label || "",
               shootingStats: result.shooting_stats || INITIAL_COACHING_RESULTS.shootingStats,
               shotEvents: result.shot_events || [],
+              phaseScores: normalizePhaseScores(result.phase_scores),
               classification: result.classification || "Needs Improvement",
               detectedErrors: (result.dominant_feedback || []).map((message) => ({
                 issue: message,
@@ -1910,8 +1958,6 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
             review={coachReview}
             reviewLevel={reviewLevel}
             onReviewLevelChange={setReviewLevel}
-            miniGoalsEnabled={miniGoalsEnabled}
-            onMiniGoalsToggle={setMiniGoalsEnabled}
             score={coachingResults.averageScore}
             classification={coachingResults.classification}
           />
@@ -1919,12 +1965,20 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
 
         {coachingResults.analyzedFrames > 0 ? <ScoreReasonPanel reasons={scoreReasons} /> : null}
 
+        {coachingResults.analyzedFrames > 0 && coachingResults.phaseScores.length > 0 ? (
+          <PhaseScorePanel phases={coachingResults.phaseScores} />
+        ) : null}
+
+        {coachingResults.analyzedFrames > 0 ? (
+          <PoseComparisonPanel comparison={coachingResults.poseComparison} />
+        ) : null}
+
         {selectedModeId === "shooting_form" && reviewShotEvents.length > 0 ? (
           <ShotReviewPanel shotEvents={reviewShotEvents} reviewLevel={reviewLevel} />
         ) : null}
 
         {selectedModeId !== "shooting_form" && modeReview ? (
-          <ModeReviewPanel review={modeReview} reviewLevel={reviewLevel} miniGoalsEnabled={miniGoalsEnabled} />
+          <ModeReviewPanel review={modeReview} reviewLevel={reviewLevel} />
         ) : null}
 
         {reviewLevel === "intermediate" && coachingResults.analyzedFrames > 0 ? (
@@ -1966,6 +2020,7 @@ export default function UnifiedCoachingSessionScreen({ route, navigation }) {
                 reviewEvents={reviewMoments}
                 outputWidth={coachingResults.outputWidth}
                 outputHeight={coachingResults.outputHeight}
+                speechText={coachingSpeechText}
               />
             </View>
             <PrimaryButton title="Download Video" onPress={openResultVideo} />
@@ -2072,14 +2127,33 @@ function SetupGuidePanel({ guide }) {
         </View>
       ))}
       <View style={cameraStyles.poseReferenceCard}>
-        <Text style={cameraStyles.poseReferenceTitle}>{guide.poseCardTitle}</Text>
-        <Text style={cameraStyles.poseReferenceHeadline}>{guide.poseHeadline}</Text>
-        <Image
-          source={guide.motionGif || guide.image}
+        <View style={cameraStyles.tutorialHeaderRow}>
+          <View style={cameraStyles.tutorialIcon}>
+            <Feather name="play" size={13} color={colors.primary} />
+          </View>
+          <Text style={cameraStyles.poseReferenceTitle}>Video Tutorial</Text>
+        </View>
+        <CorePoseTutorialVideo
+          source={guide.tutorialVideo || guide.motionGif}
+          fallbackImage={guide.image}
           accessibilityLabel={guide.imageAlt}
-          style={cameraStyles.poseReferenceImage}
-          resizeMode="contain"
         />
+        <TouchableOpacity
+          accessibilityLabel={`Open tutorial source from ${guide.tutorialCredit}`}
+          activeOpacity={0.82}
+          onPress={() => void Linking.openURL(guide.tutorialUrl)}
+          style={cameraStyles.tutorialAttribution}
+        >
+          <Feather name="external-link" size={13} color={colors.secondary} />
+          <Text style={cameraStyles.tutorialAttributionText}>Source: {guide.tutorialCredit}</Text>
+        </TouchableOpacity>
+        <Text style={cameraStyles.corePoseSequenceTitle}>Complete Core Pose Sequence</Text>
+        {(guide.corePosePhases || []).map((phase) => (
+          <View key={phase.label} style={cameraStyles.corePosePhaseRow}>
+            <Text style={cameraStyles.corePosePhaseLabel}>{phase.label}</Text>
+            <Text style={cameraStyles.corePosePhaseCue}>{phase.cue}</Text>
+          </View>
+        ))}
         {guide.poseCues.map((cue) => (
           <View key={cue} style={cameraStyles.poseCueRow}>
             <View style={cameraStyles.poseCueDot} />
@@ -2087,6 +2161,81 @@ function SetupGuidePanel({ guide }) {
           </View>
         ))}
       </View>
+    </View>
+  );
+}
+
+function PoseComparisonPanel({ comparison = [] }) {
+  const metrics = Array.isArray(comparison) ? comparison : [];
+  const measuredCount = metrics.filter((metric) => metric.status !== "insufficient").length;
+
+  return (
+    <View style={cameraStyles.poseComparisonPanel}>
+      <View style={cameraStyles.poseComparisonHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={cameraStyles.clipLabel}>Your Pose vs Tutorial Reference</Text>
+          <Text style={cameraStyles.poseComparisonIntro}>
+            Clip medians and frame-match rates are compared with SureBall's operational ranges for the same core
+            drill phases taught in the tutorial video.
+          </Text>
+        </View>
+        <View style={cameraStyles.measuredPill}>
+          <Text style={cameraStyles.measuredPillText}>{measuredCount}/{metrics.length} MEASURED</Text>
+        </View>
+      </View>
+
+      <Text style={cameraStyles.poseComparisonGuideNote}>
+        For the tutorial video and looping GIF, open the Full Guide before recording. This section only summarizes how
+        the uploaded clip matched the reference ranges.
+      </Text>
+
+      {metrics.map((metric) => {
+        const statusColor =
+          metric.status === "matched"
+            ? colors.success
+            : metric.status === "close"
+              ? colors.warning
+              : metric.status === "needs_focus"
+                ? colors.danger
+                : colors.muted;
+        const statusLabel =
+          metric.status === "matched"
+            ? "Matched"
+            : metric.status === "close"
+              ? "Close"
+              : metric.status === "needs_focus"
+                ? "Needs Focus"
+                : "Not Detected";
+        return (
+          <View key={metric.key} style={cameraStyles.poseMetricCard}>
+            <View style={cameraStyles.poseMetricHeader}>
+              <Text style={cameraStyles.poseMetricLabel}>{metric.label}</Text>
+              <View style={[cameraStyles.poseMetricStatus, { borderColor: statusColor }]}>
+                <Text style={[cameraStyles.poseMetricStatusText, { color: statusColor }]}>{statusLabel}</Text>
+              </View>
+            </View>
+            <View style={cameraStyles.poseMetricValues}>
+              <View style={cameraStyles.poseMetricValueColumn}>
+                <Text style={cameraStyles.poseMetricEyebrow}>YOUR CLIP MEDIAN</Text>
+                <Text style={cameraStyles.poseMetricValue}>{metric.actual_display}</Text>
+              </View>
+              <View style={cameraStyles.poseMetricValueColumn}>
+                <Text style={cameraStyles.poseMetricEyebrow}>REFERENCE RANGE</Text>
+                <Text style={cameraStyles.poseMetricValue}>{metric.reference_display}</Text>
+              </View>
+            </View>
+            <View style={cameraStyles.poseMatchTrack}>
+              <View style={[cameraStyles.poseMatchFill, { width: `${clampPercent(metric.match_rate)}%`, backgroundColor: statusColor }]} />
+            </View>
+            <Text style={cameraStyles.poseMetricFootnote}>
+              {Number(metric.match_rate || 0).toFixed(1)}% of {metric.observed_frames || 0} measured frames matched. {metric.coaching_cue}
+            </Text>
+          </View>
+        );
+      })}
+      <Text style={cameraStyles.poseComparisonDisclaimer}>
+        Reference ranges are rule-based coaching targets for this prototype, not a medical diagnosis or a replacement for a professional coach.
+      </Text>
     </View>
   );
 }
@@ -2112,12 +2261,59 @@ function ScoreReasonPanel({ reasons }) {
   );
 }
 
+function phaseStatusColor(status) {
+  if (status === "excellent") return colors.success;
+  if (status === "good") return colors.secondary;
+  if (status === "developing") return colors.warning;
+  if (status === "needs_focus") return colors.danger;
+  return colors.muted;
+}
+
+function phaseStatusLabel(status) {
+  if (status === "excellent") return "Excellent";
+  if (status === "good") return "Good";
+  if (status === "developing") return "Developing";
+  if (status === "needs_focus") return "Needs Focus";
+  return "Not Observed";
+}
+
+function PhaseScorePanel({ phases }) {
+  return (
+    <View style={cameraStyles.phaseScorePanel}>
+      <Text style={cameraStyles.clipLabel}>Key Phase Scores</Text>
+      <Text style={cameraStyles.phaseScoreIntro}>
+        SureBall groups frames into drill phases from the tutorial reference for review only. These phase cards do not
+        change the main Average score.
+      </Text>
+      <View style={cameraStyles.phaseScoreGrid}>
+        {phases.map((phase) => {
+          const color = phaseStatusColor(phase.status);
+          const score = Number(phase.averageScore || 0);
+          return (
+            <View key={phase.key} style={[cameraStyles.phaseScoreCard, { borderColor: color }]}>
+              <View style={cameraStyles.phaseScoreHeader}>
+                <Text style={cameraStyles.phaseScoreLabel}>{phase.label}</Text>
+                <Text style={[cameraStyles.phaseScoreStatus, { color }]}>{phaseStatusLabel(phase.status)}</Text>
+              </View>
+              <View style={cameraStyles.phaseScoreTrack}>
+                <View style={[cameraStyles.phaseScoreFill, { width: `${clampPercent(score)}%`, backgroundColor: color }]} />
+              </View>
+              <Text style={cameraStyles.phaseScoreValue}>
+                {phase.frameCount > 0 ? `${score.toFixed(1)} from ${phase.frameCount} frames` : "No reliable frames"}
+              </Text>
+              <Text style={cameraStyles.phaseScoreCue}>{phase.cue || phase.focus}</Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 function CoachReviewPanel({
   review,
   reviewLevel,
   onReviewLevelChange,
-  miniGoalsEnabled,
-  onMiniGoalsToggle,
   score,
   classification,
 }) {
@@ -2176,22 +2372,6 @@ function CoachReviewPanel({
           ? "Intermediate view adds the score breakdown and full focus list below."
           : review.scoreText}
       </Text>
-      <View style={cameraStyles.miniGoalToggleRow}>
-        <View style={{ flex: 1 }}>
-          <Text style={cameraStyles.miniGoalTitle}>Mini Goals</Text>
-          <Text style={cameraStyles.miniGoalCopy}>Show one next drill after each review.</Text>
-        </View>
-        <Switch
-          value={miniGoalsEnabled}
-          onValueChange={(value) => {
-            hapticSelection();
-            onMiniGoalsToggle(value);
-          }}
-          thumbColor={colors.text}
-          trackColor={{ false: colors.track, true: colors.primary }}
-        />
-      </View>
-      {miniGoalsEnabled ? <Text style={cameraStyles.nextDrillText}>{review.nextDrill}</Text> : null}
     </View>
   );
 }
@@ -2247,7 +2427,7 @@ function ShotReviewPanel({ shotEvents, reviewLevel }) {
   );
 }
 
-function ModeReviewPanel({ review, reviewLevel, miniGoalsEnabled }) {
+function ModeReviewPanel({ review, reviewLevel }) {
   return (
     <View style={cameraStyles.modeReviewPanel}>
       <View style={cameraStyles.modeReviewHeader}>
@@ -2284,12 +2464,11 @@ function ModeReviewPanel({ review, reviewLevel, miniGoalsEnabled }) {
       <Text style={cameraStyles.modeReviewCue}>
         {reviewLevel === "intermediate" ? review.intermediateCue : review.beginnerCue}
       </Text>
-      {miniGoalsEnabled ? <Text style={cameraStyles.nextDrillText}>{review.nextDrill}</Text> : null}
     </View>
   );
 }
 
-function ResultVideoPlayer({ videoUrl, reviewEvents = [], outputWidth = 0, outputHeight = 0 }) {
+function ResultVideoPlayer({ videoUrl, reviewEvents = [], outputWidth = 0, outputHeight = 0, speechText = "" }) {
   const player = useVideoPlayer(
     {
       uri: videoUrl,
@@ -2301,9 +2480,83 @@ function ResultVideoPlayer({ videoUrl, reviewEvents = [], outputWidth = 0, outpu
     }
   );
   const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
+  const [coachingAudioEnabled, setCoachingAudioEnabled] = useState(true);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [speechStatus, setSpeechStatus] = useState(
+    speechText.trim() ? "Voice cues are ready for this review." : "Voice cues are not available for this review."
+  );
+  const spokenVideoRef = useRef(null);
+  const speechMountedRef = useRef(true);
   const videoMoments = Array.isArray(reviewEvents) ? reviewEvents : [];
   const outputIsLandscape = Number(outputWidth || 0) > Number(outputHeight || 0);
   const videoHeight = outputIsLandscape ? 220 : 340;
+
+  const speakCoachingFeedback = useCallback(() => {
+    const text = speechText.trim();
+    if (!text) {
+      setSpeechStatus("No coaching voice text was generated for this review.");
+      return;
+    }
+    if (speechMountedRef.current) {
+      setIsSpeaking(true);
+      setSpeechStatus("Playing coaching voice cues...");
+    }
+    Speech.stop();
+    Speech.speak(text, {
+      language: "en-US",
+      pitch: 1,
+      rate: 0.92,
+      onDone: () => {
+        if (!speechMountedRef.current) {
+          return;
+        }
+        setIsSpeaking(false);
+        setSpeechStatus("Voice cues finished. Tap Play Voice Cues to hear them again.");
+      },
+      onStopped: () => {
+        if (!speechMountedRef.current) {
+          return;
+        }
+        setIsSpeaking(false);
+        setSpeechStatus("Voice cues stopped.");
+      },
+      onError: (error) => {
+        if (!speechMountedRef.current) {
+          return;
+        }
+        setIsSpeaking(false);
+        setSpeechStatus(
+          `Voice cues could not play. Check the device media volume and Text-to-Speech settings. ${String(
+            error?.message || error || ""
+          ).trim()}`
+        );
+      },
+    });
+  }, [speechText]);
+
+  useEffect(() => {
+    spokenVideoRef.current = null;
+    setSpeechStatus(speechText.trim() ? "Voice cues are ready for this review." : "Voice cues are not available for this review.");
+  }, [speechText, videoUrl]);
+
+  useEffect(() => {
+    if (!coachingAudioEnabled || !speechText.trim() || spokenVideoRef.current === videoUrl) {
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      spokenVideoRef.current = videoUrl;
+      speakCoachingFeedback();
+    }, isPlaying ? 650 : 1100);
+    return () => clearTimeout(timer);
+  }, [coachingAudioEnabled, isPlaying, speakCoachingFeedback, speechText, videoUrl]);
+
+  useEffect(
+    () => () => {
+      speechMountedRef.current = false;
+      Speech.stop();
+    },
+    []
+  );
 
   function jumpToMoment(event) {
     hapticSelection();
@@ -2328,6 +2581,10 @@ function ResultVideoPlayer({ videoUrl, reviewEvents = [], outputWidth = 0, outpu
               player.pause();
             } else {
               player.play();
+              if (coachingAudioEnabled && speechText.trim() && spokenVideoRef.current !== videoUrl) {
+                spokenVideoRef.current = videoUrl;
+                setTimeout(speakCoachingFeedback, 250);
+              }
             }
           }}
           style={{
@@ -2344,6 +2601,66 @@ function ResultVideoPlayer({ videoUrl, reviewEvents = [], outputWidth = 0, outpu
             {isPlaying ? "Pause Preview" : "Play Preview"}
           </Text>
         </TouchableOpacity>
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+          <TouchableOpacity
+            accessibilityLabel="Replay coaching audio"
+            activeOpacity={0.9}
+            onPress={() => {
+              if (isSpeaking) {
+                Speech.stop();
+                return;
+              }
+              speakCoachingFeedback();
+            }}
+            style={{
+              flex: 1,
+              borderRadius: 14,
+              borderWidth: 1,
+              borderColor: colors.secondary,
+              paddingVertical: 11,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Feather name={isSpeaking ? "volume-x" : "volume-2"} size={16} color={colors.secondary} />
+            <Text style={{ marginTop: 4, color: colors.secondary, fontSize: 12, fontWeight: "800" }}>
+              {isSpeaking ? "Stop Voice" : "Play Voice Cues"}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            accessibilityLabel={coachingAudioEnabled ? "Mute coaching audio" : "Enable coaching audio"}
+            activeOpacity={0.9}
+            onPress={() => {
+              if (coachingAudioEnabled) {
+                Speech.stop();
+                setIsSpeaking(false);
+                setCoachingAudioEnabled(false);
+                setSpeechStatus("Auto voice is off. Tap Play Voice Cues if you still want to hear the feedback.");
+                return;
+              }
+              setCoachingAudioEnabled(true);
+              spokenVideoRef.current = videoUrl;
+              speakCoachingFeedback();
+            }}
+            style={{
+              flex: 1,
+              borderRadius: 14,
+              borderWidth: 1,
+              borderColor: colors.border,
+              paddingVertical: 11,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Feather name={coachingAudioEnabled ? "volume-x" : "volume-2"} size={16} color={colors.text} />
+            <Text style={{ marginTop: 4, color: colors.text, fontSize: 12, fontWeight: "800" }}>
+              {coachingAudioEnabled ? "Auto Voice On" : "Auto Voice Off"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <Text selectable style={{ marginTop: 10, color: colors.muted, fontSize: 12, lineHeight: 18 }}>
+          {speechStatus}
+        </Text>
         {videoMoments.length > 0 ? (
           <View style={cameraStyles.videoShotJumpPanel}>
             <Text style={cameraStyles.clipLabel}>Jump To Review</Text>
@@ -3089,21 +3406,61 @@ const cameraStyles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "900",
   },
-  poseReferenceHeadline: {
-    marginTop: 6,
-    color: colors.muted,
-    fontSize: 12,
-    lineHeight: 18,
-    fontWeight: "700",
+  tutorialHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
-  poseReferenceImage: {
-    width: "100%",
-    height: 190,
-    marginTop: 12,
+  tutorialIcon: {
+    width: 28,
+    height: 28,
     borderRadius: 14,
-    backgroundColor: colors.backgroundSoft,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255, 122, 26, 0.12)",
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: "rgba(255, 122, 26, 0.32)",
+  },
+  tutorialAttribution: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    alignSelf: "flex-start",
+    paddingTop: 9,
+    paddingHorizontal: 2,
+  },
+  tutorialAttributionText: {
+    color: colors.secondary,
+    fontSize: 10,
+    fontWeight: "800",
+    textDecorationLine: "underline",
+  },
+  corePoseSequenceTitle: {
+    marginTop: 14,
+    color: colors.secondary,
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
+  corePosePhaseRow: {
+    marginTop: 9,
+    padding: 10,
+    borderRadius: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.035)",
+    borderLeftWidth: 3,
+    borderLeftColor: colors.primary,
+  },
+  corePosePhaseLabel: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  corePosePhaseCue: {
+    marginTop: 4,
+    color: colors.muted,
+    fontSize: 11,
+    lineHeight: 16,
   },
   poseCueRow: {
     marginTop: 8,
@@ -3133,6 +3490,121 @@ const cameraStyles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
+  poseComparisonPanel: {
+    marginTop: 16,
+    borderRadius: 20,
+    padding: 14,
+    backgroundColor: "rgba(8, 18, 32, 0.96)",
+    borderWidth: 1,
+    borderColor: "rgba(61, 205, 255, 0.28)",
+  },
+  poseComparisonHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  poseComparisonIntro: {
+    marginTop: 6,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  measuredPill: {
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    backgroundColor: "rgba(61, 205, 255, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(61, 205, 255, 0.32)",
+  },
+  measuredPillText: {
+    color: colors.secondary,
+    fontSize: 9,
+    fontWeight: "900",
+  },
+  poseComparisonGuideNote: {
+    marginTop: 10,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "700",
+  },
+  poseMetricCard: {
+    marginTop: 10,
+    borderRadius: 14,
+    padding: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.035)",
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  poseMetricHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  poseMetricLabel: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  poseMetricStatus: {
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  poseMetricStatusText: {
+    fontSize: 9,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  poseMetricValues: {
+    marginTop: 10,
+    flexDirection: "row",
+    gap: 8,
+  },
+  poseMetricValueColumn: {
+    flex: 1,
+  },
+  poseMetricEyebrow: {
+    color: colors.muted,
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  poseMetricValue: {
+    marginTop: 4,
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "800",
+  },
+  poseMatchTrack: {
+    height: 6,
+    marginTop: 10,
+    borderRadius: 999,
+    overflow: "hidden",
+    backgroundColor: colors.track,
+  },
+  poseMatchFill: {
+    height: "100%",
+    borderRadius: 999,
+  },
+  poseMetricFootnote: {
+    marginTop: 7,
+    color: colors.muted,
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  poseComparisonDisclaimer: {
+    marginTop: 12,
+    color: colors.muted,
+    fontSize: 10,
+    lineHeight: 15,
+    fontStyle: "italic",
+  },
   scoreReasonIntro: {
     marginTop: 6,
     color: colors.muted,
@@ -3161,6 +3633,71 @@ const cameraStyles = StyleSheet.create({
     color: colors.muted,
     fontSize: 12,
     lineHeight: 18,
+    fontWeight: "700",
+  },
+  phaseScorePanel: {
+    marginTop: 16,
+    borderRadius: 20,
+    padding: 14,
+    backgroundColor: "rgba(8, 18, 32, 0.96)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 122, 26, 0.28)",
+  },
+  phaseScoreIntro: {
+    marginTop: 6,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  phaseScoreGrid: {
+    marginTop: 12,
+    gap: 10,
+  },
+  phaseScoreCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    backgroundColor: colors.cardElevated,
+    padding: 12,
+  },
+  phaseScoreHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  phaseScoreLabel: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  phaseScoreStatus: {
+    fontSize: 10,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  phaseScoreTrack: {
+    height: 7,
+    marginTop: 10,
+    borderRadius: 999,
+    overflow: "hidden",
+    backgroundColor: colors.track,
+  },
+  phaseScoreFill: {
+    height: "100%",
+    borderRadius: 999,
+  },
+  phaseScoreValue: {
+    marginTop: 7,
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  phaseScoreCue: {
+    marginTop: 5,
+    color: colors.muted,
+    fontSize: 11,
+    lineHeight: 16,
     fontWeight: "700",
   },
   coachReviewPanel: {
@@ -3283,35 +3820,6 @@ const cameraStyles = StyleSheet.create({
     color: colors.muted,
     fontSize: 13,
     lineHeight: 19,
-  },
-  miniGoalToggleRow: {
-    marginTop: 12,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.card,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  miniGoalTitle: {
-    color: colors.text,
-    fontSize: 13,
-    fontWeight: "900",
-  },
-  miniGoalCopy: {
-    marginTop: 3,
-    color: colors.muted,
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  nextDrillText: {
-    marginTop: 8,
-    color: colors.secondary,
-    fontSize: 13,
-    lineHeight: 19,
-    fontWeight: "800",
   },
   shotReviewPanel: {
     marginTop: 16,

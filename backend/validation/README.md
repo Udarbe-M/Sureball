@@ -25,10 +25,10 @@ SureBall combines two signals:
 - YOLOv11 ball detection finds the basketball location in each analyzed frame.
 - MediaPipe pose estimation finds body landmarks such as shoulders, elbows, wrists, hips, and knees.
 
-For dribbling, the system watches for the ball in a low zone near the hand and counts a new dribble when a controlled low contact starts after a cooldown window.
+For dribbling, the system watches for the ball in a low zone and counts a new dribble when a controlled low contact starts after a cooldown window.
 
-For passing, the system watches for controlled possession near the body or wrist, then counts a pass when the ball separates into a release window after that controlled state.
+For passing, the system watches for controlled possession near the body, then counts a pass when the ball separates into a release window after that controlled state.
 
 For shooting, the system uses the shot-training detector labels to count shot attempts, makes, misses, and accuracy while the coaching pipeline continues to score form using YOLOv11 ball tracking and MediaPipe pose estimation.
 
-Feedback is generated from the same features, including ball-to-wrist distance, ball height zone, ball-body offset, elbow/wrist alignment, knee bend, torso control, and balance. The score is a rule-based coaching score built from those feature checks.
+Feedback is generated from the same visible features, including ball height zone, ball-body offset, elbow/wrist alignment, comfortable knee load, torso control, and balance. The score is a rule-based coaching score built from those feature checks, while direct hand-distance measurement is kept out of the shooting score because it is not reliable enough in uploaded clips.

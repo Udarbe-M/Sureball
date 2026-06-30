@@ -124,34 +124,32 @@ def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detec
     feedback: List[FeedbackCue] = []
 
     if mode == "shooting_form":
+        shooting_release_window = _is_shooting_release_window(features)
         if features.wrist_alignment is not None and features.wrist_alignment > 0.28:
+            deduction = 12
+            if features.wrist_alignment > 0.80:
+                deduction = 24
+            elif features.wrist_alignment > 0.50:
+                deduction = 18
             feedback.append(
                 FeedbackCue(
                     code="shooting_elbow_alignment",
                     message="Keep your shooting elbow aligned.",
                     severity="high",
-                    deduction=12,
+                    deduction=deduction,
                 )
             )
-        if features.knee_bend_angle is not None and features.knee_bend_angle > 150:
+        if not shooting_release_window and features.knee_bend_angle is not None and features.knee_bend_angle > 165:
+            deduction = 5 if features.knee_bend_angle <= 176 else 12
             feedback.append(
                 FeedbackCue(
                     code="shooting_knee_bend",
-                    message="Bend your knees more before the shot.",
+                    message="Use a comfortable knee bend before the shot.",
                     severity="medium",
-                    deduction=10,
+                    deduction=deduction,
                 )
             )
-        if features.ball_to_wrist_distance is not None and features.ball_to_wrist_distance > 0.42:
-            feedback.append(
-                FeedbackCue(
-                    code="shooting_ball_control",
-                    message="Keep the ball closer to your shooting hand.",
-                    severity="medium",
-                    deduction=10,
-                )
-            )
-        if features.ball_release_position is not None and features.ball_release_position < 0:
+        if shooting_release_window and features.ball_release_position is not None and features.ball_release_position < 0:
             feedback.append(
                 FeedbackCue(
                     code="shooting_release_height",
@@ -161,15 +159,20 @@ def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detec
                 )
             )
         if features.body_balance is not None and features.body_balance > 0.22:
+            deduction = 8
+            if features.body_balance > 0.35:
+                deduction = 18
+            elif features.body_balance > 0.28:
+                deduction = 12
             feedback.append(
                 FeedbackCue(
                     code="shooting_balance",
                     message="Maintain body balance through the shot.",
                     severity="medium",
-                    deduction=8,
+                    deduction=deduction,
                 )
             )
-        summary = "Shooting form evaluated with emphasis on elbow alignment, knee bend, ball control, and balance."
+        summary = "Shooting form evaluated with emphasis on elbow alignment, comfortable knee load, release height, and balance."
 
     elif mode == "dribbling":
         if features.knee_bend_angle is not None and features.knee_bend_angle > 155:
@@ -191,15 +194,6 @@ def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detec
                 )
             )
         if ball_detected:
-            if features.ball_to_wrist_distance is not None and features.ball_to_wrist_distance > 0.6:
-                feedback.append(
-                    FeedbackCue(
-                        code="dribbling_ball_connection",
-                        message="Keep the ball closer to your hand through the dribble.",
-                        severity="high",
-                        deduction=12,
-                    )
-                )
             if features.ball_vertical_zone == "high":
                 feedback.append(
                     FeedbackCue(
@@ -227,10 +221,14 @@ def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detec
                     deduction=6,
                 )
             )
-        summary = "Dribbling analyzed with YOLOv11 ball tracking and MediaPipe pose for handle control, stance, and balance."
+        summary = "Dribbling analyzed with YOLOv11 ball tracking and MediaPipe pose for visible ball path, stance, and balance."
 
     elif mode == "passing":
-        if features.elbow_angle is not None and features.elbow_angle < 80:
+        pass_release_window = (
+            (features.elbow_angle is not None and features.elbow_angle >= 80)
+            or (features.ball_body_offset is not None and features.ball_body_offset > 0.85)
+        )
+        if pass_release_window and features.elbow_angle is not None and features.elbow_angle < 80:
             feedback.append(
                 FeedbackCue(
                     code="passing_elbow_extension",
@@ -239,7 +237,7 @@ def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detec
                     deduction=10,
                 )
             )
-        if features.wrist_alignment is not None and features.wrist_alignment > 0.34:
+        if pass_release_window and features.wrist_alignment is not None and features.wrist_alignment > 0.34:
             feedback.append(
                 FeedbackCue(
                     code="passing_release_line",
@@ -258,24 +256,6 @@ def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detec
                 )
             )
         if ball_detected:
-            if features.ball_to_wrist_distance is not None and features.ball_to_wrist_distance > 0.5:
-                feedback.append(
-                    FeedbackCue(
-                        code="passing_ball_connection",
-                        message="Keep the ball connected to your passing hand before release.",
-                        severity="high",
-                        deduction=12,
-                    )
-                )
-            if features.ball_vertical_zone == "low":
-                feedback.append(
-                    FeedbackCue(
-                        code="passing_ball_window",
-                        message="Bring the pass into a stronger chest-to-shoulder passing window.",
-                        severity="medium",
-                        deduction=8,
-                    )
-                )
             if features.ball_body_offset is not None and features.ball_body_offset > 1.25:
                 feedback.append(
                     FeedbackCue(
@@ -294,7 +274,7 @@ def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detec
                     deduction=6,
                 )
             )
-        summary = "Passing analyzed with YOLOv11 ball tracking and MediaPipe pose for release line, ball control, and balance."
+        summary = "Passing analyzed with YOLOv11 ball tracking and MediaPipe pose for release line, visible ball path, and balance."
 
     elif mode == "defensive_stance":
         if features.feet_spacing is not None and features.feet_spacing < 1.1:
@@ -401,15 +381,6 @@ def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detec
                 )
             )
         if ball_detected:
-            if features.ball_to_wrist_distance is not None and features.ball_to_wrist_distance > 0.72:
-                feedback.append(
-                    FeedbackCue(
-                        code="footwork_ball_control",
-                        message="Keep the ball connected to your hands while moving through the drill.",
-                        severity="medium",
-                        deduction=8,
-                    )
-                )
             if features.ball_body_offset is not None and features.ball_body_offset > 1.15:
                 feedback.append(
                     FeedbackCue(
@@ -428,15 +399,15 @@ def _generate_mode_feedback(mode: CoachingMode, features: FeatureSet, ball_detec
                     deduction=4,
                 )
             )
-        summary = "Basic footwork checked for base, posture control, ready knees, symmetry, and ball control."
+        summary = "Basic footwork checked for base, posture control, ready knees, symmetry, and visible ball path."
 
     if not ball_detected and mode == "shooting_form":
         feedback.append(
             FeedbackCue(
                 code="ball_not_detected",
-                message="Basketball not clearly detected. Keep the ball visible to the camera.",
+                message="Basketball not clearly detected. Shot-result review may be less reliable, but technique is scored from visible body form.",
                 severity="low",
-                deduction=6,
+                deduction=0,
             )
         )
 
@@ -480,3 +451,9 @@ def _classify_ball_vertical_zone(
     if ball_center["y"] <= hip_mid["y"]:
         return "torso"
     return "low"
+
+
+def _is_shooting_release_window(features: FeatureSet) -> bool:
+    if features.ball_vertical_zone == "high":
+        return True
+    return features.ball_release_position is not None and features.ball_release_position >= 0

@@ -23,6 +23,8 @@ from .coaching_video import (
 )
 from .feedback_engine import extract_features, generate_feedback
 from .one_euro import LandmarkSmoother
+from .phase_scoring import PhaseScoreAggregator
+from .pose_comparison import PoseComparisonAggregator
 from .pose_estimator import PoseEstimator
 from .schemas import (
     CoachingVideoStartResponse,
@@ -86,20 +88,20 @@ MODE_LIBRARY = [
     ModeInfo(
         id="shooting_form",
         title="Shooting",
-        description="Analyze shot mechanics, release structure, and ball control.",
-        target_focus=["elbow alignment", "knee bend", "ball release", "balance"],
+        description="Analyze shot mechanics, release structure, and visible ball path.",
+        target_focus=["elbow alignment", "comfortable knee load", "ball release", "balance"],
     ),
     ModeInfo(
         id="dribbling",
         title="Dribbling",
-        description="Analyze ball control, low handle position, body balance, and athletic stance.",
-        target_focus=["ball control", "low handle", "knee bend", "balance"],
+        description="Analyze visible ball path, low handle position, body balance, and athletic stance.",
+        target_focus=["ball path", "low handle", "knee bend", "balance"],
     ),
     ModeInfo(
         id="passing",
         title="Passing",
-        description="Evaluate pass setup, hand-to-ball connection, release line, and balance.",
-        target_focus=["ball control", "release line", "torso control", "balance"],
+        description="Evaluate pass setup, visible ball path, release line, and balance.",
+        target_focus=["ball path", "release line", "torso control", "balance"],
     ),
 ]
 
@@ -323,6 +325,8 @@ async def analyze_video(
     fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
     sampled_results: List[FrameAnalysisResponse] = []
     action_counter = CoachingActionCounter(mode, fps=fps)
+    phase_scoring = PhaseScoreAggregator(mode)
+    pose_comparison = PoseComparisonAggregator(mode)
     landmark_smoother = LandmarkSmoother(min_cutoff=1.2, beta=0.03, derivative_cutoff=1.0)
 
     try:
@@ -343,6 +347,9 @@ async def analyze_video(
                     timestamp_seconds=frame_index / max(fps, 1.0),
                 )["response"]
                 action_counter.observe(result)
+                phase_scoring.observe(result)
+                if result.pose_detected:
+                    pose_comparison.observe(result.features)
                 sampled_results.append(result)
             frame_index += 1
     finally:
@@ -352,7 +359,10 @@ async def analyze_video(
     if not sampled_results:
         raise HTTPException(status_code=400, detail="No analyzable frames found in the uploaded video.")
 
-    average_score = sum(item.score.score for item in sampled_results) / len(sampled_results)
+    raw_average_score = sum(item.score.score for item in sampled_results) / len(sampled_results)
+    phase_scores = phase_scoring.build()
+    pose_comparison_results = pose_comparison.build()
+    average_score = raw_average_score
     best_score = max(item.score.score for item in sampled_results)
     worst_score = min(item.score.score for item in sampled_results)
     cue_frequency: dict[str, int] = {}
@@ -388,6 +398,12 @@ async def analyze_video(
         action_label=action_counter.action_label,
         action_count=action_counter.count,
         shooting_evidence_frames=shooting_evidence_frames,
+        shooting_setup_frames=_phase_frame_count(phase_scores, "set_position"),
+        shooting_release_frames=_phase_frame_count(phase_scores, "release"),
+        shooting_follow_through_frames=_phase_frame_count(phase_scores, "follow_through"),
+        shooting_setup_score=_phase_average_score(phase_scores, "set_position"),
+        shooting_follow_through_score=_phase_average_score(phase_scores, "follow_through"),
+        pose_comparison=pose_comparison_results,
     )
     average_score = validity.average_score
     best_score = validity.best_score
@@ -395,7 +411,7 @@ async def analyze_video(
     dominant_feedback = merge_validity_warnings(validity.warnings, dominant_feedback)
     classification = validity.classification
     session_summary = (
-        f"{mode.replace('_', ' ').title()} session completed with an average score of "
+        f"{mode.replace('_', ' ').title()} session completed with an overall technique score of "
         f"{average_score:.1f}. Focus areas: {', '.join(dominant_feedback)}"
     )
 
@@ -410,6 +426,7 @@ async def analyze_video(
         worst_score=worst_score,
         classification=classification,
         dominant_feedback=dominant_feedback,
+        phase_scores=phase_scores,
         frame_results=sampled_results[:10],
         session_summary=session_summary,
     )
@@ -422,12 +439,40 @@ async def analyze_video(
         summary=response.session_summary,
         source_type="video",
         user_key=user_key,
+        phase_scores=phase_scores,
     )
     return response
 
 
 def _has_shooting_evidence(result: FrameAnalysisResponse) -> bool:
-    return result.pose_detected and result.ball_detected
+    if not result.pose_detected or not result.ball_detected:
+        return False
+    features = result.features
+    if features.ball_release_position is not None:
+        return features.ball_release_position >= 0
+    return features.ball_vertical_zone == "high"
+
+
+def _phase_frame_count(phase_scores: list[dict[str, object]], key: str) -> int:
+    for phase in phase_scores:
+        if str(phase.get("key") or "") != key:
+            continue
+        try:
+            return int(phase.get("frame_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _phase_average_score(phase_scores: list[dict[str, object]], key: str) -> float | None:
+    for phase in phase_scores:
+        if str(phase.get("key") or "") != key:
+            continue
+        try:
+            return float(phase.get("average_score") or 0.0)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _save_session_record(
@@ -438,6 +483,7 @@ def _save_session_record(
     summary: str,
     source_type: str,
     user_key: str,
+    phase_scores: list[dict[str, object]] | None = None,
 ) -> None:
     append_session_history(
         {
@@ -448,6 +494,7 @@ def _save_session_record(
             "classification": classification,
             "summary": summary,
             "source_type": source_type,
+            "phase_scores": phase_scores or [],
             "user_key": user_key,
         }
     )

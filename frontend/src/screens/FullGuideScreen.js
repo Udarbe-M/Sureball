@@ -1,5 +1,7 @@
+import { Feather } from "@expo/vector-icons";
 import React, { useLayoutEffect, useState } from "react";
-import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Image, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import CorePoseTutorialVideo from "../components/CorePoseTutorialVideo";
 import { getModeGuide } from "../data/modeGuides";
 import { colors } from "../theme/colors";
 import { commonStyles } from "../theme/styles";
@@ -37,13 +39,42 @@ export default function FullGuideScreen({ route, navigation }) {
       </View>
 
       <View style={styles.poseCard}>
-        <Text style={styles.poseEyebrow}>Ideal Form</Text>
-        <Image
-          source={guide.motionGif || guide.image}
-          accessibilityLabel={guide.imageAlt}
-          style={styles.poseMotionImage}
-          resizeMode="contain"
+        <Text style={styles.poseEyebrow}>Reference Tutorial Video</Text>
+        <Text style={styles.referenceIntro}>
+          Follow this tutorial as the drill reference. SureBall's pose checks and phase scores are aligned with the
+          same core movements shown here.
+        </Text>
+        <CorePoseTutorialVideo
+          source={guide.tutorialVideo || guide.motionGif}
+          fallbackImage={guide.image}
+          accessibilityLabel={`${guide.modeTitle} tutorial video`}
         />
+        <TouchableOpacity
+          accessibilityLabel={`Open tutorial source from ${guide.tutorialCredit}`}
+          activeOpacity={0.82}
+          onPress={() => void Linking.openURL(guide.tutorialUrl)}
+          style={styles.tutorialAttribution}
+        >
+          <Feather name="external-link" size={13} color={colors.secondary} />
+          <Text style={styles.tutorialAttributionText}>Source: {guide.tutorialCredit}</Text>
+        </TouchableOpacity>
+        {guide.motionGif ? (
+          <View style={styles.motionPreviewCard}>
+            <View style={styles.motionHeaderRow}>
+              <Feather name="repeat" size={14} color={colors.primary} />
+              <Text style={styles.motionPreviewTitle}>Quick Form GIF</Text>
+            </View>
+            <Text style={styles.motionPreviewText}>
+              Use this looping preview to quickly visualize the main movement shape before watching the full tutorial.
+            </Text>
+            <Image
+              source={guide.motionGif}
+              accessibilityLabel={`${guide.modeTitle} looping form preview`}
+              style={styles.motionGif}
+              resizeMode="contain"
+            />
+          </View>
+        ) : null}
         <Text style={styles.poseHeadline}>{guide.poseHeadline}</Text>
       </View>
 
@@ -102,14 +133,59 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     textTransform: "uppercase",
   },
-  poseMotionImage: {
-    width: "100%",
-    height: 420,
-    marginTop: 12,
-    borderRadius: 18,
-    backgroundColor: colors.backgroundSoft,
+  referenceIntro: {
+    marginTop: 8,
+    color: colors.text,
+    fontSize: 13,
+    lineHeight: 20,
+    fontWeight: "700",
+  },
+  tutorialAttribution: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    alignSelf: "flex-start",
+    paddingTop: 9,
+    paddingHorizontal: 2,
+  },
+  tutorialAttributionText: {
+    color: colors.secondary,
+    fontSize: 11,
+    fontWeight: "800",
+    textDecorationLine: "underline",
+  },
+  motionPreviewCard: {
+    marginTop: 14,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.border,
+    backgroundColor: "rgba(255, 255, 255, 0.04)",
+    padding: 12,
+  },
+  motionHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
+  motionPreviewTitle: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  motionPreviewText: {
+    marginTop: 7,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: "700",
+  },
+  motionGif: {
+    width: "100%",
+    height: 180,
+    marginTop: 10,
+    borderRadius: 12,
+    backgroundColor: colors.backgroundSoft,
   },
   poseHeadline: {
     marginTop: 14,

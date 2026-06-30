@@ -109,7 +109,6 @@ Example response:
     "knee_bend_angle": 132.9,
     "torso_alignment": 7.1,
     "feet_spacing": 1.03,
-    "ball_to_wrist_distance": 0.22,
     "ball_release_position": 34.0,
     "body_balance": 0.08,
     "symmetry_score": 0.92
@@ -127,7 +126,7 @@ Example response:
     "classification": "Excellent",
     "deductions": 0
   },
-  "coaching_summary": "Shooting form evaluated with emphasis on elbow alignment, knee bend, ball control, and balance.",
+  "coaching_summary": "Shooting form evaluated with emphasis on elbow alignment, comfortable knee load, release height, and balance.",
   "ball_box": {
     "x1": 412.6,
     "y1": 217.2,
@@ -179,8 +178,7 @@ The prototype uses simple coaching thresholds instead of a trained classifier.
 
 - `shooting_form`
   - elbow alignment
-  - knee bend
-  - ball-to-hand control
+  - comfortable knee load
   - release height
   - balance
 - `defensive_stance`

@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from .feedback_engine import extract_features, generate_feedback
-from .scoring import calculate_score
+from .scoring import calculate_score, classify_score
 from .schemas import FeedbackCue, FrameAnalysisResponse, ScoreResult
 from .utils import frame_to_base64, now_utc
 
@@ -58,7 +58,13 @@ def run_coaching_analysis(
             ),
         )
     score = calculate_score(feedback)
-    score = _cap_invalid_frame_score(score, pose_detected=pose_detected, ball_detected=ball_detected)
+    score = _cap_invalid_frame_score(
+        score,
+        mode=mode,
+        pose_detected=pose_detected,
+        ball_detected=ball_detected,
+        features=features,
+    )
 
     drawing_landmarks = pose_result.get("drawing_landmarks") or pose_result["raw_landmarks"]
     annotated = pose_estimator.draw(frame, drawing_landmarks if pose_detected else None)
@@ -131,13 +137,24 @@ def _landmark_visibility(point: Any) -> float:
         return 0.0
 
 
-def _cap_invalid_frame_score(score: ScoreResult, *, pose_detected: bool, ball_detected: bool) -> ScoreResult:
+def _cap_invalid_frame_score(
+    score: ScoreResult,
+    *,
+    mode: str,
+    pose_detected: bool,
+    ball_detected: bool,
+    features: Any = None,
+) -> ScoreResult:
     cap = None
     if not pose_detected and not ball_detected:
         cap = 12
     elif not pose_detected:
         cap = 25
-    elif not ball_detected:
+    elif mode == "shooting_form" and not ball_detected:
+        cap = 82
+    elif mode == "shooting_form" and ball_detected and not _is_shooting_release_frame(features):
+        cap = 72
+    elif not ball_detected and mode != "shooting_form":
         cap = 55
 
     if cap is None or score.score <= cap:
@@ -147,5 +164,15 @@ def _cap_invalid_frame_score(score: ScoreResult, *, pose_detected: bool, ball_de
     return ScoreResult(
         score=capped_score,
         deductions=max(score.deductions, 100 - capped_score),
-        classification="Poor" if capped_score < 58 else score.classification,
+        classification=classify_score(capped_score),
     )
+
+
+def _is_shooting_release_frame(features: Any) -> bool:
+    release_position = getattr(features, "ball_release_position", None)
+    try:
+        if release_position is not None:
+            return float(release_position) >= 0
+    except (TypeError, ValueError):
+        return False
+    return getattr(features, "ball_vertical_zone", None) == "high"

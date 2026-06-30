@@ -8,19 +8,19 @@ const MODES = [
     id: "shooting_form",
     title: "Shooting",
     tag: "Precision",
-    description: "Analyze elbow alignment, wrist control, knee bend, and shooting balance.",
+    description: "Analyze elbow line, comfortable knee load, release height, and shooting balance.",
   },
   {
     id: "dribbling",
     title: "Dribbling",
     tag: "Handle",
-    description: "Analyze low handle position, ball-to-hand connection, stance, and balance.",
+    description: "Analyze low handle position, visible ball path, stance, and balance.",
   },
   {
     id: "passing",
     title: "Passing",
     tag: "Pass",
-    description: "Evaluate passing line, ball control, release window, and body balance.",
+    description: "Evaluate passing line, visible ball path, release window, and body balance.",
   },
 ];
 

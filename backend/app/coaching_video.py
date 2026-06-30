@@ -12,6 +12,8 @@ from fastapi import UploadFile
 from .clip_validity import apply_coaching_clip_validity, merge_validity_warnings
 from .coaching_analysis import run_coaching_analysis
 from .one_euro import LandmarkSmoother
+from .phase_scoring import PhaseScoreAggregator
+from .pose_comparison import PoseComparisonAggregator
 from .shot_training import (
     ANNOTATED_VIDEO_CRF,
     ANNOTATED_VIDEO_PRESET,
@@ -75,9 +77,8 @@ class CoachingActionCounter:
 
     def _observe_dribbling(self, features: Any, frame_index: int) -> None:
         ball_zone = _feature_value(features, "ball_vertical_zone")
-        hand_distance = _feature_float(features, "ball_to_wrist_distance")
-        controlled_low_contact = ball_zone == "low" and (hand_distance is None or hand_distance <= 1.1)
-        released_from_contact = ball_zone == "high" or _is_at_or_above(hand_distance, 0.85)
+        controlled_low_contact = ball_zone == "low"
+        released_from_contact = ball_zone == "high"
 
         if controlled_low_contact and self.dribble_ready and not self.low_contact_active and self._can_count(frame_index):
             self.count += 1
@@ -96,10 +97,9 @@ class CoachingActionCounter:
         self.low_contact_active = controlled_low_contact
 
     def _observe_passing(self, features: Any, frame_index: int) -> None:
-        hand_distance = _feature_float(features, "ball_to_wrist_distance")
         body_offset = _feature_float(features, "ball_body_offset")
-        controlled = _is_at_or_below(hand_distance, 0.55) or _is_at_or_below(body_offset, 0.85)
-        released = _is_at_or_above(hand_distance, 0.85) or _is_at_or_above(body_offset, 1.25)
+        controlled = _is_at_or_below(body_offset, 0.85)
+        released = _is_at_or_above(body_offset, 1.25)
 
         if controlled:
             self.pass_ready = True
@@ -221,6 +221,8 @@ class CoachingVideoJob:
                 shooting_stats={},
                 shot_events=[],
                 dominant_feedback=[],
+                pose_comparison=[],
+                phase_scores=[],
                 classification=None,
                 summary=None,
             )
@@ -234,6 +236,8 @@ class CoachingVideoJob:
             ball_frames = 0
             shooting_evidence_frames = 0
             feedback_counts: dict[str, int] = {}
+            pose_comparison = PoseComparisonAggregator(self.mode)
+            phase_scoring = PhaseScoreAggregator(self.mode)
             latest_bundle: Optional[dict[str, Any]] = None
             landmark_smoother = LandmarkSmoother(min_cutoff=1.2, beta=0.03, derivative_cutoff=1.0)
             action_counter = CoachingActionCounter(self.mode, fps=fps)
@@ -269,12 +273,14 @@ class CoachingVideoJob:
                     analyzed_frames += 1
                     if response.pose_detected:
                         pose_frames += 1
+                        pose_comparison.observe(response.features)
                     if response.ball_detected:
                         ball_frames += 1
                     if self.mode == "shooting_form" and _has_shooting_evidence(response):
                         shooting_evidence_frames += 1
                     score_value = response.score.score
                     score_total += score_value
+                    phase_scoring.observe(response)
                     best_score = max(best_score, score_value)
                     worst_score = min(worst_score, score_value)
                     for cue in response.feedback:
@@ -304,7 +310,9 @@ class CoachingVideoJob:
                 frame_index += 1
 
                 if frame_index % 10 == 0 or frame_index == max_frames:
-                    average_score = round(score_total / max(analyzed_frames, 1), 2)
+                    raw_average_score = round(score_total / max(analyzed_frames, 1), 2)
+                    phase_scores = phase_scoring.build()
+                    pose_comparison_results = pose_comparison.build()
                     dominant_feedback = [
                         message
                         for message, _count in sorted(
@@ -313,6 +321,27 @@ class CoachingVideoJob:
                             reverse=True,
                         )[:3]
                     ]
+                    if not dominant_feedback:
+                        dominant_feedback = ["Strong overall movement quality detected."]
+                    progress_validity = apply_coaching_clip_validity(
+                        mode=self.mode,
+                        average_score=raw_average_score,
+                        best_score=best_score,
+                        worst_score=0 if worst_score == 100 and analyzed_frames == 0 else worst_score,
+                        analyzed_frames=analyzed_frames,
+                        pose_frames=pose_frames,
+                        ball_frames=ball_frames,
+                        action_label=action_counter.action_label,
+                        action_count=_display_action_count(action_counter, shot_tracker),
+                        shooting_evidence_frames=shooting_evidence_frames,
+                        shooting_setup_frames=_phase_frame_count(phase_scores, "set_position"),
+                        shooting_release_frames=_phase_frame_count(phase_scores, "release"),
+                        shooting_follow_through_frames=_phase_frame_count(phase_scores, "follow_through"),
+                        shooting_setup_score=_phase_average_score(phase_scores, "set_position"),
+                        shooting_follow_through_score=_phase_average_score(phase_scores, "follow_through"),
+                        pose_comparison=pose_comparison_results,
+                    )
+                    display_feedback = merge_validity_warnings(progress_validity.warnings, dominant_feedback)
                     _update_job(
                         self.file_id,
                         status="processing",
@@ -327,14 +356,17 @@ class CoachingVideoJob:
                         ball_frames=ball_frames,
                         pose_detection_rate=_percent(pose_frames, analyzed_frames),
                         ball_detection_rate=_percent(ball_frames, analyzed_frames),
-                        average_score=average_score,
-                        best_score=best_score,
-                        worst_score=0 if worst_score == 100 and analyzed_frames == 0 else worst_score,
+                        average_score=progress_validity.average_score,
+                        best_score=progress_validity.best_score,
+                        worst_score=progress_validity.worst_score,
                         action_count=_display_action_count(action_counter, shot_tracker),
                         action_label=_display_action_label(action_counter, shot_tracker),
                         shooting_stats=_shooting_stats(shot_tracker),
                         shot_events=_shot_events(shot_tracker),
-                        dominant_feedback=dominant_feedback,
+                        dominant_feedback=display_feedback,
+                        pose_comparison=pose_comparison_results,
+                        phase_scores=phase_scores,
+                        classification=progress_validity.classification,
                     )
 
                 if frame_index >= max_frames:
@@ -357,7 +389,10 @@ class CoachingVideoJob:
             if shot_tracker is not None:
                 shot_tracker.finalize_pending_attempt(frame_index)
 
-            average_score = round(score_total / max(analyzed_frames, 1), 2)
+            raw_average_score = round(score_total / max(analyzed_frames, 1), 2)
+            phase_scores = phase_scoring.build()
+            pose_comparison_results = pose_comparison.build()
+            average_score = raw_average_score
             dominant_feedback = [
                 message
                 for message, _count in sorted(
@@ -380,6 +415,12 @@ class CoachingVideoJob:
                 action_label=action_counter.action_label,
                 action_count=_display_action_count(action_counter, shot_tracker),
                 shooting_evidence_frames=shooting_evidence_frames,
+                shooting_setup_frames=_phase_frame_count(phase_scores, "set_position"),
+                shooting_release_frames=_phase_frame_count(phase_scores, "release"),
+                shooting_follow_through_frames=_phase_frame_count(phase_scores, "follow_through"),
+                shooting_setup_score=_phase_average_score(phase_scores, "set_position"),
+                shooting_follow_through_score=_phase_average_score(phase_scores, "follow_through"),
+                pose_comparison=pose_comparison_results,
             )
             average_score = validity.average_score
             best_score = validity.best_score
@@ -392,7 +433,7 @@ class CoachingVideoJob:
                 shot_tracker=shot_tracker,
             )
             summary = (
-                f"{self.mode.replace('_', ' ').title()} video analysis finished with an average score of "
+                f"{self.mode.replace('_', ' ').title()} video analysis finished with an overall technique score of "
                 f"{average_score:.1f}.{count_summary} Focus areas: {', '.join(dominant_feedback)}"
             )
 
@@ -408,6 +449,8 @@ class CoachingVideoJob:
                     "action_label": _display_action_label(action_counter, shot_tracker),
                     "shooting_stats": _shooting_stats(shot_tracker),
                     "shot_events": _shot_events(shot_tracker),
+                    "phase_scores": phase_scores,
+                    "pose_comparison": pose_comparison_results,
                     "source_type": "video",
                     "user_key": self.user_key,
                 }
@@ -435,6 +478,8 @@ class CoachingVideoJob:
                 shooting_stats=_shooting_stats(shot_tracker),
                 shot_events=_shot_events(shot_tracker),
                 dominant_feedback=dominant_feedback,
+                pose_comparison=pose_comparison_results,
+                phase_scores=phase_scores,
                 classification=classification,
                 summary=summary,
             )
@@ -669,6 +714,8 @@ def start_coaching_video_job(
             "shooting_stats": {},
             "shot_events": [],
             "dominant_feedback": [],
+            "pose_comparison": [],
+            "phase_scores": [],
             "classification": None,
             "summary": None,
             "error_message": None,
@@ -727,6 +774,8 @@ def get_coaching_video_status(file_id: str) -> dict[str, object]:
                 "shooting_stats": {},
                 "shot_events": [],
                 "dominant_feedback": [],
+                "pose_comparison": [],
+                "phase_scores": [],
                 "classification": None,
                 "summary": None,
                 "error_message": None,
@@ -840,24 +889,18 @@ def _simple_feedback_label(mode: str, response: Any) -> str:
 
     if mode == "dribbling":
         ball_zone = _feature_value(features, "ball_vertical_zone")
-        hand_distance = _feature_float(features, "ball_to_wrist_distance")
         if ball_zone == "high" or "high" in normalized:
             return "Keep dribble below hip"
-        if hand_distance is not None and hand_distance > 1.1:
-            return "Keep ball close to hand"
         if "balance" in normalized:
             return "Stay low and balanced"
         return "Good low control" if score >= 75 else "Control each bounce"
 
     if mode == "passing":
-        hand_distance = _feature_float(features, "ball_to_wrist_distance")
-        if hand_distance is not None and hand_distance > 1.0:
-            return "Finish hands to target"
         if "balance" in normalized:
             return "Hold balance after pass"
         if "release" in normalized or "target" in normalized:
             return "Aim release at target"
-        return "Clean pass release" if score >= 75 else "Connect ball to hands"
+        return "Clean pass release" if score >= 75 else "Finish hands to target"
 
     if "setup" in normalized:
         return "Show clear shot setup"
@@ -1000,7 +1043,36 @@ def _draw_shooting_detection_boxes(frame: np.ndarray, detections: list[Dict[str,
 
 
 def _has_shooting_evidence(response: Any) -> bool:
-    return bool(getattr(response, "pose_detected", False)) and bool(getattr(response, "ball_detected", False))
+    if not bool(getattr(response, "pose_detected", False)) or not bool(getattr(response, "ball_detected", False)):
+        return False
+    features = getattr(response, "features", None)
+    ball_zone = _feature_value(features, "ball_vertical_zone")
+    release_position = _feature_float(features, "ball_release_position")
+    if release_position is not None:
+        return release_position >= 0
+    return ball_zone == "high"
+
+
+def _phase_frame_count(phase_scores: list[dict[str, object]], key: str) -> int:
+    for phase in phase_scores:
+        if str(phase.get("key") or "") != key:
+            continue
+        try:
+            return int(phase.get("frame_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _phase_average_score(phase_scores: list[dict[str, object]], key: str) -> Optional[float]:
+    for phase in phase_scores:
+        if str(phase.get("key") or "") != key:
+            continue
+        try:
+            return float(phase.get("average_score") or 0.0)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _feature_value(features: Any, key: str) -> Any:

@@ -189,22 +189,12 @@ def _score_shooting_form(metrics: Mapping[str, float]) -> list[DetectedError]:
     )
     issues.extend(
         _greater_than_error(
-            value=_metric(metrics, "ball_to_wrist_distance"),
-            thresholds=[(0.22, "Minor", 5), (0.32, "Moderate", 9), (0.42, "Major", 13)],
-            code="ball_too_far_from_hand",
-            issue="Ball too far from shooting hand",
-            metric="ball_to_wrist_distance",
-            recommendation="Keep the ball tighter to the shooting pocket and hand.",
-        )
-    )
-    issues.extend(
-        _greater_than_error(
             value=_metric(metrics, "knee_bend_angle"),
-            thresholds=[(140.0, "Minor", 4), (150.0, "Moderate", 8), (160.0, "Major", 12)],
+            thresholds=[(155.0, "Minor", 3), (168.0, "Moderate", 6), (176.0, "Major", 9)],
             code="insufficient_knee_bend",
-            issue="Insufficient knee bend",
+            issue="Limited knee load",
             metric="knee_bend_angle",
-            recommendation="Load more power by bending the knees before release.",
+            recommendation="Use a comfortable knee bend before release without forcing a deep squat.",
         )
     )
     issues.extend(
@@ -293,16 +283,6 @@ def _score_dribbling(metrics: Mapping[str, float]) -> list[DetectedError]:
     )
     issues.extend(
         _greater_than_error(
-            value=_metric(metrics, "ball_to_wrist_distance"),
-            thresholds=[(0.32, "Minor", 4), (0.46, "Moderate", 8), (0.60, "Major", 12)],
-            code="loose_handle",
-            issue="Loose dribble control",
-            metric="ball_to_wrist_distance",
-            recommendation="Keep the ball closer to the dribbling hand.",
-        )
-    )
-    issues.extend(
-        _greater_than_error(
             value=_metric(metrics, "ball_body_offset"),
             thresholds=[(0.75, "Minor", 3), (1.00, "Moderate", 7), (1.20, "Major", 11)],
             code="wide_dribble_path",
@@ -346,16 +326,6 @@ def _score_passing(metrics: Mapping[str, float]) -> list[DetectedError]:
             issue="Passing line is off",
             metric="wrist_alignment",
             recommendation="Keep the wrist and elbow aligned through release.",
-        )
-    )
-    issues.extend(
-        _greater_than_error(
-            value=_metric(metrics, "ball_to_wrist_distance"),
-            thresholds=[(0.26, "Minor", 4), (0.38, "Moderate", 8), (0.50, "Major", 12)],
-            code="pass_ball_disconnected",
-            issue="Ball disconnected from hand",
-            metric="ball_to_wrist_distance",
-            recommendation="Keep the ball connected to your passing hand before release.",
         )
     )
     issues.extend(
@@ -438,14 +408,7 @@ def _coordination_error(metrics: Mapping[str, float]) -> list[DetectedError]:
             recommendation="Sync the ball with your body rhythm and steps.",
         )
 
-    return _greater_than_error(
-        value=_metric(metrics, "ball_to_wrist_distance"),
-        thresholds=[(0.28, "Minor", 4), (0.40, "Moderate", 8), (0.52, "Major", 12)],
-        code="poor_ball_body_coordination",
-        issue="Poor ball-body coordination",
-        metric="ball_to_wrist_distance",
-        recommendation="Keep the ball connected to the body during movement.",
-    )
+    return []
 
 
 def _metric(metrics: Mapping[str, float], key: str) -> Optional[float]:
